@@ -17,9 +17,8 @@ from email.mime.multipart import MIMEMultipart
 import requests
 from materialconvert_functions_5 import convert_curve, average_curves
 
-
-
-############  PASSWORD #################
+#########################################################################################################################################################
+##############################################  PASSWORD ################################################################################################
 
 if "password_entered" not in st.session_state:
     st.session_state["password_entered"] = False
@@ -47,17 +46,140 @@ def check_password():
 if not check_password():
     st.stop()
 
-# ------------------------------------------- START OF CODE ---------------------------------------------------------------------------------
-##################################################################
-############### SEND EMAIL PARTTTTT #############################
-# --- Startup Diagnostic Test Email (Runs once upon login) ---
-# --- Startup Diagnostic Test Email (Runs once upon login) ---
+#########################################################################################################################################################
 
-############### SEND EMAIL PARTTTTT #############################
+@st.dialog(" Manage & Split Coil Batch", width="large")
+def open_coil_management_dialog(grade, thick, length, group_rows):
+    st.write(f"### 📦 Selected Group: **{grade} | {thick} mm | {length:.0f} mm**")
+    st.markdown("Select a specific coil/lotto from this group to manage or split:")
+    
+    sorted_full_df = prod_df.sort_values(by="id").reset_index(drop=True)
+    
+    coil_options = {}
+    for _, row in group_rows.iterrows():
+        db_id = int(row['id'])
+        
+        match_idx = sorted_full_df[sorted_full_df['id'] == db_id].index
+        seq_id = int(match_idx[0] + 1) if not match_idx.empty else db_id
+        
+        father = row.get('lotto_number', '')
+        son = row.get('lotto_figlio', '')
+        lotto_str = f"{father} → {son}" if (father and son) else (son or father or "No Lotto")
+        
+        label = f"Queue ID #{seq_id} | Lotto: {lotto_str}"
+        coil_options[label] = db_id
 
-# =========================================================================
-# ### SECTION 1: PAGE CONFIGURATION & DATABASE SETUP ###
-# =========================================================================
+    selected_coil_label = st.selectbox("Choose Specific Coil", options=list(coil_options.keys()))
+    selected_db_id = coil_options[selected_coil_label]
+    
+    # Get the specific row data
+    selected_row = group_rows[group_rows['id'].astype(int) == int(selected_db_id)].iloc[0]
+    
+    st.write("---")
+    tabs = st.tabs([" Split Coil", "✏️ Edit Values", "🗑 Delete / Move"])
+    
+    with tabs[0]:
+        st.markdown(" Split Coil (Father -> Sons)")
+        rem_w_val = selected_row.get("rd_remaining_weight_kg")
+        current_w_kg = float(rem_w_val) if pd.notna(rem_w_val) else float(selected_row.get("coil_weight_kg", 0.0))
+        current_w_tons = current_w_kg / 1000.0
+
+        rem_l_val = selected_row.get("rd_remaining_length_mm")
+        current_l = float(rem_l_val) if pd.notna(rem_l_val) else float(selected_row.get("coil_length_mm", 0.0))
+        
+        base_lotto = selected_row.get('lotto_figlio') if pd.notna(selected_row.get('lotto_figlio')) else selected_row.get('lotto_number', '')
+        
+        st.info(f"Available to split: **{current_w_tons:.3f} TON** / **{current_l:.2f} mm**")
+        
+        num_children = st.number_input("Number of Components", min_value=2, max_value=10, value=2, step=1, key=f"modal_num_child_{selected_db_id}")
+        
+        with st.form(key=f"modal_split_form_{selected_db_id}"):
+            children_inputs = []
+            letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            weight_per_mm_kg = current_w_kg / current_l if current_l > 0 else 0.0
+            
+            for i in range(int(num_children)):
+                st.markdown(f"**Component {i+1} ({letters[i]})**")
+                cc1, cc2, cc3 = st.columns(3)
+                with cc1:
+                    c_lotto = st.text_input(f"Component Code {i+1}", value=f"{base_lotto}-{letters[i]}", key=f"modal_split_lotto_{selected_db_id}_{i}")
+                with cc2:
+                    c_length = st.number_input(f"Length {i+1} [mm]", min_value=0.0, max_value=current_l, value=0.0, key=f"modal_split_l_{selected_db_id}_{i}")
+                with cc3:
+                    c_weight_kg = c_length * weight_per_mm_kg
+                    c_weight_tons = c_weight_kg / 1000.0
+                    st.write(f"Weight {i+1} [TON]")
+                    st.metric(label="", value=f"{c_weight_tons:.3f} TON")
+                
+                children_inputs.append({"lotto": c_lotto, "weight": c_weight_kg, "length": c_length})
+                st.write("---")
+                
+            if st.form_submit_button("Confirm Split & Close Parent", use_container_width=True):
+                total_l = sum(c["length"] for c in children_inputs)
+                if total_l > current_l:
+                    st.error("Sum of child lengths exceeds parent remaining length!")
+                else:
+                    split_cloud_material(selected_db_id, children_inputs, auto_promote_rd=True)
+                    st.success("Coil successfully split and pushed to R&D!")
+                    st.cache_data.clear()
+                    st.rerun()
+
+    with tabs[1]:
+        st.markdown(" ✏️ Edit Selected Batch Values")
+        with st.form(key=f"modal_edit_form_{selected_db_id}"):
+            new_grade = st.text_input("Grade", value=str(selected_row.get("grade", "")))
+            new_thickness = st.number_input("Thickness [mm]", value=float(selected_row.get("thickness", 0.0)), step=0.1)
+            new_yield = st.number_input("Yield Stress [MPa]", value=float(selected_row.get("yield_mpa", 0.0)), step=5.0)
+            new_uts = st.number_input("Failure Stress [MPa]", value=float(selected_row.get("uts_mpa", 0.0)), step=5.0)
+            new_elong = st.number_input("Elongation [%]", value=float(selected_row.get("elongation_pct", 0.0)), step=0.5)
+
+            db_weight_kg = float(selected_row.get("coil_weight_kg", 0.0) or 0.0)
+            initial_weight_tons = db_weight_kg / 1000.0 if db_weight_kg else 0.0
+            new_weight_tons = st.number_input("Coil Weight [TON]", value=initial_weight_tons, step=1.0, format="%.3f")
+            new_length = st.number_input("Coil Length [mm]", value=float(selected_row.get("coil_length_mm", 0.0)), step=100.0)
+            
+            val_padre = selected_row.get("lotto_number", "") if pd.notna(selected_row.get("lotto_number")) else ""
+            val_figlio = selected_row.get("lotto_figlio", "") if pd.notna(selected_row.get("lotto_figlio")) else ""
+            
+            new_lotto_padre = st.text_input("Lotto Father", value=str(val_padre))
+            new_component_code = st.text_input("Component Code", value=str(val_figlio))
+            new_provider = st.text_input("Provider", value=str(selected_row.get("provider", "")))
+            
+            if st.form_submit_button("💾 Save Changes", use_container_width=True):
+                update_cloud_material(
+                    selected_db_id, 
+                    grade=new_grade, thickness=new_thickness, 
+                    yield_mpa=new_yield, uts_mpa=new_uts, 
+                    elongation_pct=new_elong, lotto_number=new_lotto_padre, 
+                    lotto_figlio=new_component_code, provider=new_provider,
+                    coil_weight_kg=new_weight_tons * 1000.0, coil_length_mm=new_length
+                )
+                st.success("Batch updated successfully!")
+                st.cache_data.clear()
+                st.rerun()
+
+    with tabs[2]:
+        st.markdown("#### 🗑 Delete or Move Batch")
+        col_m1, col_m2 = st.columns(2)
+        with col_m1:
+            if st.button(" Move to R&D", key=f"modal_rnd_{selected_db_id}", use_container_width=True):
+                promote_cloud_material(selected_db_id)
+                st.success("Moved to R&D!")
+                st.cache_data.clear()
+                st.rerun()
+        with col_m2:
+            if st.button("🗑 Delete Batch", key=f"modal_del_{selected_db_id}", use_container_width=True):
+                delete_cloud_material(selected_db_id)
+                st.success("Batch deleted!")
+                st.cache_data.clear()
+                st.rerun()
+
+#########################################################################################################################################################
+
+
+#########################################################################################################################################################
+##############################################  PAGE CONFIGURATION & DATABASE SETUP #####################################################################
+
 st.set_page_config(page_title="IMEVA Materials Hub", layout="wide")
 
 @st.cache_resource
@@ -94,8 +216,6 @@ def upload_certificate_to_cloud(uploaded_file, lotto_identifier):
     except Exception as e:
         st.error(f"Cloud Storage Upload Error: {e}")
         return None
-    
-
 
 @st.dialog("Supplier Mill Certificate Viewer", width="large")
 def show_cert_modal(mat_name, cert_url, info):
@@ -104,18 +224,16 @@ def show_cert_modal(mat_name, cert_url, info):
     st.divider()
     
     if cert_url:
-        st.markdown(f"🔗 [Open certificate in a new browser tab]({cert_url})", unsafe_allow_html=True)
+        st.markdown(f" [Open certificate in a new browser tab]({cert_url})", unsafe_allow_html=True)
         if cert_url.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
             st.image(cert_url, caption="Certificate Document", use_container_width=True)
         else:
-            st.info("ℹ️ Inline PDF previews are often restricted by security policies. Use the link above if the viewer below appears empty.")
+            st.info(" Inline PDF previews are often restricted by security policies. Use the link above if the viewer below appears empty.")
             st.markdown(f'<iframe src="{cert_url}" width="100%" height="600px"></iframe>', unsafe_allow_html=True)
     else:
         st.warning("No certificate URL provided.")
 
 
-
-# Auto-restore spectrometer reports from Supabase into session state on app load
 if "chemical_reports" not in st.session_state:
     st.session_state.chemical_reports = {}
 
@@ -149,7 +267,7 @@ if "reports_loaded_from_cloud" not in st.session_state:
 
 
 def fetch_cloud_materials(hub_section="PROD", family='METALS'):
-    """Fetch entries filtered by hub section, including Crush and RD fields."""
+    """Fetch entries filtered by hub section, including Crush, RD, and Quality Status fields."""
     
     if hub_section == "RD":
         query = """
@@ -159,7 +277,7 @@ def fetch_cloud_materials(hub_section="PROD", family='METALS'):
                 rd_remaining_weight_kg, rd_remaining_length_mm, rd_notes, 
                 lotto_number, lotto_figlio, provider, 
                 certificate_url AS datasheet, 
-                is_promoted, codice, description, quantity
+                is_promoted, codice, description, quantity, quality_status
             FROM materials 
             WHERE (hub_section = 'RD' OR is_promoted = 1) AND family = :fam 
             ORDER BY id DESC;
@@ -170,7 +288,7 @@ def fetch_cloud_materials(hub_section="PROD", family='METALS'):
         query = """
             SELECT 
                 id, parent_id, family, hub_section, grade, 
-                lotto_number, lotto_figlio, codice, description, quantity, rd_notes
+                lotto_number, lotto_figlio, codice, description, quantity, rd_notes, quality_status
             FROM materials 
             WHERE hub_section = 'CRUSH' AND family = :fam 
             ORDER BY id DESC;
@@ -178,7 +296,6 @@ def fetch_cloud_materials(hub_section="PROD", family='METALS'):
         return conn.query(query, params={"fam": family}, ttl=0)
         
     else:
-        # Default Production Hub view
         query = """
             SELECT 
                 id, parent_id, family, hub_section, grade, thickness, 
@@ -186,7 +303,7 @@ def fetch_cloud_materials(hub_section="PROD", family='METALS'):
                 rd_remaining_weight_kg, rd_remaining_length_mm, rd_notes, 
                 lotto_number, lotto_figlio, provider, 
                 certificate_url AS datasheet, 
-                is_promoted, codice, description, quantity
+                is_promoted, codice, description, quantity, quality_status
             FROM materials 
             WHERE (hub_section = 'PROD' OR hub_section IS NULL) AND family = :fam 
             ORDER BY id DESC;
@@ -207,12 +324,12 @@ def insert_cloud_material(
                     grade, thickness, yield_mpa, uts_mpa, elongation_pct, 
                     lotto_number, lotto_figlio, provider, family, certificate_url, 
                     coil_weight_kg, coil_length_mm,
-                    rd_remaining_weight_kg, rd_remaining_length_mm
+                    rd_remaining_weight_kg, rd_remaining_length_mm, quality_status
                 )
                 VALUES (
                     :grade, :thick, :ys, :uts, :elong, 
                     :l_padre, :l_figlio, :prov, :fam, :cert, 
-                    :c_wt, :c_len, :c_wt, :c_len
+                    :c_wt, :c_len, :c_wt, :c_len, :qstat
                 )
             """),
             {
@@ -221,7 +338,8 @@ def insert_cloud_material(
                 "l_padre": lotto_padre if lotto_padre else None, 
                 "l_figlio": lotto_figlio if lotto_figlio else None, 
                 "prov": provider, "fam": family, "cert": cert_path, 
-                "c_wt": coil_weight, "c_len": actual_length
+                "c_wt": coil_weight, "c_len": actual_length,
+                "qstat": "🟢 Standby"
             }
         )
         s.commit()
@@ -279,7 +397,7 @@ def split_cloud_material(parent_id, children_list, auto_promote_rd=True):
                 }
             )
 
-        # Zero out and deactivate Parent
+        
         s.execute(
             text("""
                 UPDATE materials 
@@ -319,17 +437,23 @@ def promote_cloud_material(material_id):
 def delete_cloud_material(material_id):
     """Deletes a material batch, safely handling child foreign key constraints by unlinking."""
     with conn.session as s:
-        # Unlink any child records pointing to this parent before deleting
         s.execute(
             text('UPDATE materials SET parent_id = NULL WHERE parent_id = :id'), 
             {"id": int(material_id)}
         )
-        # Now safely delete the target record
         s.execute(
             text('DELETE FROM materials WHERE id = :id'), 
             {"id": int(material_id)}
         )
         s.commit()
+
+    if "chemical_reports" in st.session_state and material_id in st.session_state.chemical_reports:
+        del st.session_state.chemical_reports[material_id]
+        
+    if "experimental_curves" in st.session_state and material_id in st.session_state.experimental_curves:
+        del st.session_state.experimental_curves[material_id]
+        
+    st.cache_data.clear()
 
 def demote_cloud_material(material_id):
     """Un-promote batch so it returns to production and leaves R&D deck."""
@@ -361,7 +485,7 @@ def update_cloud_material(
     provider, 
     coil_weight_kg, 
     coil_length_mm,
-    uploaded_file=None # <--- Added parameter for the file
+    uploaded_file=None 
 ):
     cert_url = None
     if uploaded_file is not None:
@@ -430,9 +554,12 @@ def update_cloud_material(
             )
         s.commit()
 
-# =========================================================================
-# ### SECTION 2: REGULATORY COMPLIANCE HELPER FUNCTIONS ###
-# =========================================================================
+#########################################################################################################################################################
+
+
+#########################################################################################################################################################
+##############################################  REGULATORY COMPLIANCE HELPER FUNCTIONS ##################################################################
+
 def get_en10025_limits(grade, thickness):
     """Evaluates standard EN 10025 structural limits based on grade and thickness."""
     clean_grade = str(grade).upper().replace("JR", "").strip()
@@ -450,6 +577,19 @@ def get_en10025_limits(grade, thickness):
         uts_min, uts_max = 360, 510
     return {"min_yield": y, "min_uts": uts_min, "max_uts": uts_max}
 
+
+def determine_status(row):
+    """Determines the display status of a batch, prioritizing formal lab verification."""
+    q_status = row.get("quality_status")
+    if q_status and pd.notna(q_status) and str(q_status).strip() != "":
+        return str(q_status)
+    elif row.get("rd_remaining_weight_kg") is not None and float(row.get("rd_remaining_weight_kg", 0)) <= 0.001:
+        return "🔴 Not Available"
+    elif row.get("is_promoted") == 1:
+        return "🔬 R&D"
+    else:
+        return "🟢 Standby"
+    
 #### upload chemical composition.. from LAB  
 
 def parse_metal_power_excel(uploaded_file):
@@ -501,9 +641,11 @@ def parse_metal_power_excel(uploaded_file):
         return None, None
 ###########################  END OF CHEMICAL COMPOSITION ##################
 
-# =========================================================================
-# ### SECTION 3: APPLICATION NAVIGATION INITIALIZATION ###
-# =========================================================================
+#########################################################################################################################################################
+
+#########################################################################################################################################################
+##############################################  APPLICATION NAVIGATION INITIALIZATION ###################################################################
+
 if "current_page" not in st.session_state:
     st.session_state.current_page = "HOME"
 if "selected_material" not in st.session_state:
@@ -548,9 +690,7 @@ if "curves_loaded_from_cloud" not in st.session_state:
     except Exception as e:
         pass
 
-# =========================================================================
-# ### SECTION 4: HOME PAGE (CENTRAL PORTAL LANDING) ###
-# =========================================================================
+
 if st.session_state.current_page == "HOME":
     logo_left, logo_mid, logo_right = st.columns([3, 1, 3])
     with logo_mid:
@@ -591,7 +731,7 @@ if st.session_state.current_page == "HOME":
                 st.rerun()
         
         st.markdown("<div style='margin-top: 6px;'></div>", unsafe_allow_html=True)
-        if st.button("💥 Open Area Crush", key="metals_crash_btn", use_container_width=True):
+        if st.button(" Open Area Crush", key="metals_crash_btn", use_container_width=True):
             st.session_state.active_family = "METALS"
             st.session_state.current_page = "area_crush"
             st.rerun()
@@ -617,9 +757,13 @@ if st.session_state.current_page == "HOME":
         with box_prod:
             st.success("Production Hub")
             st.button("Locked", key="comp_prod_btn", disabled=True, use_container_width=True)
-# =========================================================================
-# ### SECTION 5: R&D LABORATORY DECK PAGE ###
-# =========================================================================
+
+#########################################################################################################################################################
+
+
+#########################################################################################################################################################
+##############################################  R&D LABORATORY DECK PAGE ################################################################################
+
 elif st.session_state.current_page == "RD_DECK":
     if st.button("← Return to Central Portal"):
         st.session_state.current_page = "HOME"
@@ -630,89 +774,134 @@ elif st.session_state.current_page == "RD_DECK":
     st.title(f"{family_name} R&D Laboratory Deck")
     st.write("---")
     
-    sq_rd_df = fetch_cloud_materials("RD", family=st.session_state.active_family)
+    sq_rd_df = fetch_cloud_materials(family=st.session_state.active_family)
     
+    if not sq_rd_df.empty:
+        sq_rd_df['calc_weight_kg'] = sq_rd_df['rd_remaining_weight_kg'].fillna(sq_rd_df['coil_weight_kg'])
+        sq_rd_df['calc_length_mm'] = sq_rd_df['rd_remaining_length_mm'].fillna(sq_rd_df['coil_length_mm'])
+        sq_rd_df = sq_rd_df[sq_rd_df['calc_weight_kg'] > 0.001]
+
     combined_materials = {}
-    for _, row in sq_rd_df.iterrows():
-        mat_id = int(row['id'])
+    if not sq_rd_df.empty:
+        # Match Production Hub's exact sorting and indexing sequence after weight filtering
+        rd_storage_df = sq_rd_df.sort_values(by="id").reset_index(drop=True).copy()
+        rd_storage_df['seq_id'] = rd_storage_df.index + 1
         
-        # --- [BLOCK 2] AUTO-RESTORE MECHANICAL DATA FROM SUPABASE IF NOT IN SESSION ---
-        if mat_id not in st.session_state.experimental_curves and pd.notna(row.get('experimental_curves_json')):
-            try:
-                raw_mech = row['experimental_curves_json']
-                mech_data = json.loads(raw_mech) if isinstance(raw_mech, str) else raw_mech
-                st.session_state.experimental_curves[mat_id] = {
-                    "strain": np.array(mech_data.get("strain", [])),
-                    "stress_MPa": np.array(mech_data.get("stress_MPa", [])),
-                    "sigy_MPa": mech_data.get("sigy_MPa", 0.0),
-                    "uts_MPa": mech_data.get("uts_MPa", 0.0),
-                    "E_GPa": mech_data.get("E_GPa", 0.0),
-                    "elongation_pct": mech_data.get("elongation_pct", 0.0),
-                    "avg_strain": np.array(mech_data.get("avg_strain", [])),
-                    "avg_stress": np.array(mech_data.get("avg_stress", [])),
-                    "eng_strain_clean": np.array(mech_data.get("eng_strain_clean", [])),
-                    "eng_stress_clean": np.array(mech_data.get("eng_stress_clean", [])),
-                    "deck": mech_data.get("deck", "")
-                }
-            except Exception:
-                pass
-        # --------------------------------------------------------------------
+        # Filter out parent lots that have been split into children (Identical to PROD_HUB)
+        split_fathers = rd_storage_df[
+            rd_storage_df['lotto_figlio'].notna() & 
+            (rd_storage_df['lotto_figlio'].astype(str).str.strip() != '') &
+            (rd_storage_df['lotto_figlio'].astype(str).str.strip() != 'None')
+        ]['lotto_number'].dropna().astype(str).unique()
+        
+        rd_storage_df = rd_storage_df[
+            ~(
+                rd_storage_df['lotto_number'].astype(str).isin(split_fathers) & 
+                (rd_storage_df['lotto_figlio'].isna() | (rd_storage_df['lotto_figlio'].astype(str).str.strip() == '') | (rd_storage_df['lotto_figlio'].astype(str).str.strip() == 'None'))
+            )
+        ]
+        
+        for _, row in rd_storage_df.iterrows():
+            mat_id = int(row['id'])
+            seq_id = int(row['seq_id'])
+            
+            if mat_id not in st.session_state.experimental_curves and pd.notna(row.get('experimental_curves_json')):
+                try:
+                    raw_mech = row['experimental_curves_json']
+                    mech_data = json.loads(raw_mech) if isinstance(raw_mech, str) else raw_mech
+                    st.session_state.experimental_curves[mat_id] = {
+                        "strain": np.array(mech_data.get("strain", [])),
+                        "stress_MPa": np.array(mech_data.get("stress_MPa", [])),
+                        "sigy_MPa": mech_data.get("sigy_MPa", 0.0),
+                        "uts_MPa": mech_data.get("uts_MPa", 0.0),
+                        "E_GPa": mech_data.get("E_GPa", 0.0),
+                        "elongation_pct": mech_data.get("elongation_pct", 0.0),
+                        "avg_strain": np.array(mech_data.get("avg_strain", [])),
+                        "avg_stress": np.array(mech_data.get("avg_stress", [])),
+                        "eng_strain_clean": np.array(mech_data.get("eng_strain_clean", [])),
+                        "eng_stress_clean": np.array(mech_data.get("eng_stress_clean", [])),
+                        "deck": mech_data.get("deck", "")
+                    }
+                except Exception:
+                    pass
 
-        grade_str = str(row['grade'])
-        thick_val = float(row['thickness'])
-        lotto_str = str(row['lotto_number']) if pd.notna(row['lotto_number']) else "N/A"
-        cert_sy = float(row['yield_mpa'])
-        cert_sf = float(row['uts_mpa'])
-        
-        # --- EXTRACT COIL METRICS & R&D TRACKING FIELDS ---
-        c_weight = float(row.get('coil_weight_kg') or 0.0)
-        c_length = float(row.get('coil_length_mm') or 0.0)
-        rd_rem_weight = float(row.get('rd_remaining_weight_kg') if pd.notna(row.get('rd_remaining_weight_kg')) else c_weight)
-        rd_rem_length = float(row.get('rd_remaining_length_mm') if pd.notna(row.get('rd_remaining_length_mm')) else c_length)
-        rd_notes_val = str(row.get('rd_notes') or "")
-        
-        #st.markdown(f"""
-        #**Remaining Stock:** **{rd_rem_weight:.1f} kg** / **{rd_rem_length:.1f} mm**  
-        #*(Original Baseline: {c_weight:.1f} kg / {c_length:.1f} mm)*  
-       # 📝 **Notes / Log History:** {rd_notes_val if rd_notes_val else "No cuts logged yet."}
-       # """)
-        
-        lab_data = st.session_state.experimental_curves.get(mat_id, {})
-        lab_sy = f"{lab_data.get('sigy_MPa', 0.0):.0f}" if lab_data else "-"
-        lab_sf = f"{lab_data.get('uts_MPa', 0.0):.0f}" if lab_data else "-"
+            grade_str = str(row['grade'])
+            thick_val = float(row['thickness'])
+            lotto_num = row.get('lotto_number')
+            lotto_fig = row.get('lotto_figlio')
+            
+            if pd.notna(lotto_num) and pd.notna(lotto_fig) and str(lotto_fig) != "None" and str(lotto_fig) != "":
+                lotto_str = f"{lotto_num} → {lotto_fig}"
+            elif pd.notna(lotto_fig) and str(lotto_fig) != "None" and str(lotto_fig) != "":
+                lotto_str = str(lotto_fig)
+            elif pd.notna(lotto_num) and str(lotto_num) != "None" and str(lotto_num) != "":
+                lotto_str = str(lotto_num)
+            else:
+                lotto_str = "N/A"
 
-        display_label = (
-            f"{grade_str}-SP{thick_val:.1f}-{lotto_str} "
-            f"[Cert: {cert_sy:.0f}, {cert_sf:.0f} | Lab: {lab_sy}, {lab_sf}]"
-        )
-        
-        combined_materials[display_label] = {
-            "id": mat_id,
-            "grade": grade_str,
-            "thickness": thick_val,
-            "cert_yield_MPa": cert_sy,
-            "cert_uts_MPa": cert_sf,
-            "lotto": lotto_str,
-            "coil_weight_kg": c_weight,
-            "coil_length_mm": c_length,
-            "rd_remaining_weight_kg": rd_rem_weight,
-            "rd_remaining_length_mm": rd_rem_length,
-            "rd_notes": rd_notes_val,
-            "datasheet": row['datasheet'] if pd.notna(row['datasheet']) else None
-        }
+            cert_sy = float(row['yield_mpa'] or 0.0)
+            cert_sf = float(row['uts_mpa'] or 0.0)
+            
+            c_weight = float(row.get('coil_weight_kg') or 0.0)
+            c_length = float(row.get('coil_length_mm') or 0.0)
+            rd_rem_weight = float(row.get('rd_remaining_weight_kg') if pd.notna(row.get('rd_remaining_weight_kg')) else c_weight)
+            rd_rem_length = float(row.get('rd_remaining_length_mm') if pd.notna(row.get('rd_remaining_length_mm')) else c_length)
+            rd_notes_val = str(row.get('rd_notes') or "")
+            
+            is_promoted = (row.get('is_promoted', 0) == 1)
+            db_status = str(row.get('quality_status') or "").strip()
+            
+            if not db_status or db_status == "None":
+                q_status = "🔬 R&D" if is_promoted else "🟢 Standby"
+            else:
+                q_status = db_status
+            
+            lab_data = st.session_state.experimental_curves.get(mat_id, {})
+            lab_sy = f"{lab_data.get('sigy_MPa', 0.0):.0f}" if lab_data else "-"
+            lab_sf = f"{lab_data.get('uts_MPa', 0.0):.0f}" if lab_data else "-"
 
-    # ==========================================
-    # PROFESSIONAL STACKED FILTER HUB
-    # ==========================================
+            display_label = (
+                f"{grade_str}-SP{thick_val:.1f}-{lotto_str} (ID #{seq_id}) "
+                f"[Cert: {cert_sy:.0f}, {cert_sf:.0f} | Lab: {lab_sy}, {lab_sf}]"
+            )
+            
+            combined_materials[mat_id] = {
+                "id": mat_id,
+                "seq_id": seq_id,
+                "display_name": display_label,
+                "grade": grade_str,
+                "thickness": thick_val,
+                "cert_yield_MPa": cert_sy,
+                "cert_uts_MPa": cert_sf,
+                "lotto": lotto_str,
+                "coil_weight_kg": c_weight,
+                "coil_length_mm": c_length,
+                "rd_remaining_weight_kg": rd_rem_weight,
+                "rd_remaining_length_mm": rd_rem_length,
+                "rd_notes": rd_notes_val,
+                "quality_status": q_status,
+                "is_promoted": is_promoted,
+                "datasheet": row['datasheet'] if pd.notna(row['datasheet']) else None
+            }
+
+
     st.sidebar.markdown("Property Filters")
     
+    filter_status = st.sidebar.selectbox(
+        "Filter by Status", 
+        ["All", "🟢 Standby", "🔬 R&D", "Verified ✅"],
+        index=0
+    )
+
+    st.sidebar.write("---")
+
     available_grades = sorted(list(set(info["grade"] for info in combined_materials.values()))) if combined_materials else ["All"]
     filter_grade = st.sidebar.selectbox("Steel Class / Grade", ["All"] + available_grades)
 
     st.sidebar.write("---")
 
     st.sidebar.markdown("Thickness")
-    enable_thick_filter = st.sidebar.checkbox("Filter by Exact Thickness", value=True)
+    enable_thick_filter = st.sidebar.checkbox("Filter by Exact Thickness", value=False)
     
     available_thicknesses = sorted(list(set(meta.get("thickness", 3.0) for meta in combined_materials.values()))) if combined_materials else [3.0]
     
@@ -727,7 +916,7 @@ elif st.session_state.current_page == "RD_DECK":
 
     st.sidebar.write("---")
 
-    with st.sidebar.expander(" Supplier Cert. or/& Laboratory", expanded=True):
+    with st.sidebar.expander("Supplier Cert. or/& Laboratory", expanded=True):
         cert_status_filter = st.radio( 
             "Select Data mode",
             ["All Batches", "Supplier Cert.", "Laboratory"]
@@ -735,11 +924,11 @@ elif st.session_state.current_page == "RD_DECK":
 
     with st.sidebar.expander("Mech. prop", expanded=True):
         min_yield, max_yield = st.slider(
-            "Yield Stress Range (σ_yield) [MPa]", 
+            "Yield Strength Range (σ_yield) [MPa]", 
             min_value=100.0, max_value=1000.0, value=(100.0, 1000.0), step=10.0
         )
         min_uts, max_uts = st.slider(
-            "Tensile Stress Range (σ_uts) [MPa]", 
+            "Tensile Strength Range (σ_uts) [MPa]", 
             min_value=100.0, max_value=1200.0, value=(100.0, 1200.0), step=10.0
         )
         min_elong, max_elong = st.slider(
@@ -747,17 +936,27 @@ elif st.session_state.current_page == "RD_DECK":
             min_value=0.0, max_value=50.0, value=(0.0, 50.0), step=0.5
         )
 
-    # ==========================================
-    # FILTERING EXECUTION LOGIC
-    # ==========================================
-    # 2. Main Layout Filter Logic
+    
     filtered_materials = {}
-    for name, metadata in combined_materials.items():
+    for mat_id, metadata in combined_materials.items():
         grade_match = (filter_grade == "All" or metadata.get("grade") == filter_grade)
+        
+        raw_st = str(metadata.get("quality_status", ""))
+        is_prom = metadata.get("is_promoted", False)
+        
+        if filter_status == "All":
+            status_match = True
+        elif filter_status == "🟢 Standby":
+            status_match = ("Standby" in raw_st) or (not is_prom)
+        elif filter_status == "🔬 R&D":
+            status_match = ("R&D" in raw_st) or is_prom
+        elif filter_status == "Verified ✅":
+            status_match = ("Verified" in raw_st) or ("✅" in raw_st)
+        else:
+            status_match = True
+
         thick_val = metadata.get("thickness", 0)
         thickness_match = True if not enable_thick_filter else (abs(thick_val - selected_thickness) <= 0.05)
-        
-        mat_id = metadata.get("id")
         
         if cert_status_filter == "Supplier Cert.":
             active_yield = metadata.get("cert_yield_MPa", 0)
@@ -783,27 +982,25 @@ elif st.session_state.current_page == "RD_DECK":
         uts_match = min_uts <= active_uts <= max_uts
         elong_match = min_elong <= active_elong <= max_elong
 
-        if grade_match and thickness_match and yield_match and uts_match and elong_match and cert_match:
-            filtered_materials[name] = metadata
+        if grade_match and status_match and thickness_match and yield_match and uts_match and elong_match and cert_match:
+            filtered_materials[mat_id] = metadata
 
     main_col, chart_col = st.columns([1, 1])
 
-    # 3. Apply the loop with clean, deduplicated card columns
     with main_col:
         st.subheader("Available Inventory & Promoted Batches")
         st.caption("Format: `[Cert: YS, UTS | Lab: YS, UTS]`")
         if not combined_materials:
-            st.info("No materials promoted to R&D yet. Add and promote batches from the Production Hub.")
+            st.info("No materials found in the database yet.")
         elif not filtered_materials:
-            st.warning("No promoted materials match the current sidebar filter limits.")
+            st.warning("No materials match the current sidebar filter limits.")
         else:
-            for mat_name, info in filtered_materials.items():
+            for mat_id, info in filtered_materials.items():
                 limits = get_en10025_limits(info["grade"], info["thickness"])
                 is_compliant = info["cert_yield_MPa"] >= limits["min_yield"]
                 
                 rem_len = info["rd_remaining_length_mm"]
                 rem_weight = info["rd_remaining_weight_kg"]
-                orig_weight = info["coil_weight_kg"]
                 inv_badge = "🟢 Available" if rem_len > 10.0 else "🔴 Low Stock"
                 status_badge = "✅ EN Compliant" if is_compliant else "❌ Non-Compliant"
                 st.markdown(f"**Status:** {status_badge} | {inv_badge} | **Stock:** {rem_weight/1000.0:.1f} TON / {rem_len:.1f} mm")
@@ -812,31 +1009,33 @@ elif st.session_state.current_page == "RD_DECK":
                 with card_col1:
                     title_col, prev_col = st.columns([4, 1])
                     with title_col:
-                        st.markdown(f"#### `{mat_name}`")
+                        st.markdown(f"#### `{info['display_name']}`")
                     with prev_col:
                         cert_url = info.get("datasheet")
                         if cert_url:
-                            if st.button("🔍 View Cert", key=f"btn_cert_{info['id']}"):
-                                show_cert_modal(mat_name, cert_url, info)
+                            if st.button("🔍 View Cert", key=f"btn_cert_{mat_id}"):
+                                show_cert_modal(info['display_name'], cert_url, info)
                         else:
                             st.markdown("*(No Cert)*")
                             
                 with card_col2:
-                    if st.button("↩️ Un-promote", key=f"demote_rd_{info['id']}", help="Send back to Production Hub"):
-                        demote_cloud_material(info['id'])
-                        st.toast("Material un-promoted and sent back to Production!")
-                        st.rerun()
+                    if info.get("is_promoted"):
+                        if st.button("↩️ Un-promote", key=f"demote_rd_{mat_id}", help="Send back to Production Hub"):
+                            demote_cloud_material(mat_id)
+                            st.toast("Material un-promoted and sent back to Production!")
+                            st.rerun()
+                    else:
+                        st.markdown("*(In Production)*")
 
-                if st.button(f"Analyze & Process Data", key=f"btn_{info['id']}", use_container_width=True):
-                    st.session_state.selected_material = mat_name
+                if st.button(f"Analyze & Process Data", key=f"btn_{mat_id}", use_container_width=True):
+                    st.session_state.selected_material = mat_id 
                 
                 st.divider()
 
-    # 4. Maintain the Charts Column 
     with chart_col:
         st.subheader("Inventory Properties Group Overview")
         if filtered_materials:
-            batches = list(filtered_materials.keys())
+            batches = [info["display_name"] for info in filtered_materials.values()]
             yields = [info["cert_yield_MPa"] for info in filtered_materials.values()]
             utss = [info["cert_uts_MPa"] for info in filtered_materials.values()]
 
@@ -864,13 +1063,11 @@ elif st.session_state.current_page == "RD_DECK":
             fig_comp, ax_comp = plt.subplots(figsize=(6, 3.8))
             curves_plotted = 0
 
-            for mat_name, info in filtered_materials.items():
-                mat_id = info["id"]
+            for mat_id, info in filtered_materials.items():
                 if mat_id in st.session_state.experimental_curves:
                     exp = st.session_state.experimental_curves[mat_id]
-                    # Robust fallback for lotto identifier legend bug
-                    lot_name = info.get('lotto') or info.get('lotto_number') or info.get('lotto_figlio') or 'N/A'
-                    ax_comp.plot(exp["strain"], exp["stress_MPa"], label=f"Lot: {lot_name}", lw=2)
+                    lot_name = info.get('lotto') or 'N/A'
+                    ax_comp.plot(exp["strain"], exp["stress_MPa"], label=f"ID #{info['seq_id']} - Lot: {lot_name}", lw=2)
                     curves_plotted += 1
 
             if curves_plotted > 0:
@@ -886,16 +1083,14 @@ elif st.session_state.current_page == "RD_DECK":
         else:
             st.caption("Awaiting inventory entries to generate strength comparison bars.")
 
-    # ---------------------------------------------------------------------
-    # ### SUB-SECTION: DETAILED REVIEW & EXPERIMENTAL MULTI-CSV ANALYSIS ###
-    # ---------------------------------------------------------------------
-    if st.session_state.selected_material and st.session_state.selected_material in combined_materials:
-        mat_name = st.session_state.selected_material
-        mat_info = combined_materials[mat_name]
+   
+    selected_mat_id = st.session_state.get("selected_material")
+    if selected_mat_id and selected_mat_id in combined_materials:
+        mat_info = combined_materials[selected_mat_id]
         mat_id = mat_info["id"]
         
         st.write("---")
-        st.header(f"📊 Detailed Review Deck: {mat_name}")
+        st.header(f"📊 Detailed Review Deck: {mat_info['display_name']}")
         
         props_col, action_col = st.columns([1, 1])
         
@@ -903,7 +1098,7 @@ elif st.session_state.current_page == "RD_DECK":
             st.subheader("📜 Material Mill Certificate Parameters")
             st.write(f"**Structural Grade:** {mat_info['grade']}")
             st.write(f"**Nominal Thickness:** {mat_info['thickness']} mm")
-            st.write(f"**Lotto :** {mat_info.get('lotto') or mat_info.get('lotto_number') or 'N/A'}")
+            st.write(f"**Lotto :** {mat_info.get('lotto') or 'N/A'}")
             st.write(f"**Yield Stress ($R_e$):** {mat_info['cert_yield_MPa']} MPa")
             st.write(f"**Tensile Stress ($R_m$):** {mat_info['cert_uts_MPa']} MPa")
 
@@ -924,7 +1119,7 @@ elif st.session_state.current_page == "RD_DECK":
             if curr_rem_l <= 0.01:
                 curr_rem_l = 0.0
 
-            rd_notes_val = mat_info.get("rd_notes") or mat_info.get("notes")
+            rd_notes_val = mat_info.get("rd_notes")
 
             st.markdown(f"""
             **Remaining Stock:** **{curr_rem_w/ 1000.0:.3f} TON** / **{curr_rem_l:.3f} mm**  
@@ -957,6 +1152,23 @@ elif st.session_state.current_page == "RD_DECK":
 
             st.markdown("---")
             st.subheader("🔬 Chemical Composition Analysis")
+
+            # --- FIX: Synchronize session state report with the currently selected material ---
+            if "chemical_reports" not in st.session_state:
+                st.session_state.chemical_reports = {}
+
+            if mat_id not in st.session_state.chemical_reports:
+                saved_spec_json = mat_info.get("spectrometer_data_json")
+                if saved_spec_json:
+                    try:
+                        loaded_spec = json.loads(saved_spec_json) if isinstance(saved_spec_json, str) else saved_spec_json
+                        df_loaded = pd.DataFrame(loaded_spec.get("df_records", []))
+                        comp_loaded = loaded_spec.get("comp", {})
+                        st.session_state.chemical_reports[mat_id] = {"df": df_loaded, "comp": comp_loaded}
+                    except Exception:
+                        pass
+            # ------------------------------------------------------------------------------
+
             uploaded_spec = st.file_uploader("Upload Spectrometer Report (Excel/CSV)", type=["xlsx", "csv"], key=f"spec_{mat_id}")
         
         if uploaded_spec is not None:
@@ -1060,32 +1272,8 @@ elif st.session_state.current_page == "RD_DECK":
                 plt.xticks(rotation=45, ha="right")
                 fig_chem.tight_layout()
                 st.pyplot(fig_chem)
-            
-            try:
-                c_val = next((v for k, v in numeric_comp.items() if k.strip().upper() == "C"), 0.0)
-                mn_val = next((v for k, v in numeric_comp.items() if k.strip().upper() == "MN"), 0.0)
-                cr_val = next((v for k, v in numeric_comp.items() if k.strip().upper() == "CR"), 0.0)
-                mo_val = next((v for k, v in numeric_comp.items() if k.strip().upper() == "MO"), 0.0)
-                v_val = next((v for k, v in numeric_comp.items() if k.strip().upper() == "V"), 0.0)
-                ni_val = next((v for k, v in numeric_comp.items() if k.strip().upper() == "NI"), 0.0)
-                cu_val = next((v for k, v in numeric_comp.items() if k.strip().upper() == "CU"), 0.0)
-                p_val = next((v for k, v in numeric_comp.items() if k.strip().upper() == "P"), 0.0)
-                s_val = next((v for k, v in numeric_comp.items() if k.strip().upper() == "S"), 0.0)
-                
-                cev = float(c_val) + float(mn_val)/6.0 + (float(cr_val)+float(mo_val)+float(v_val))/5.0 + (float(ni_val)+float(cu_val))/15.0
-                total_impurities = float(p_val) + float(s_val)
-                is_clean = (float(p_val) <= 0.030) and (float(s_val) <= 0.100)
-                impurity_status = "✅ Clean (Pass)" if is_clean else "❌ High Impurities (Fail)"
-                
-                col_m1, col_m2, col_m3 = st.columns(3)
-                with col_m1:
-                    st.metric(label="Carbon Equivalent (CEV IIW)", value=f"{cev:.3f}%")
-                with col_m2:
-                    st.metric(label="Total Impurities (P + S)", value=f"{total_impurities:.3f}%")
-                with col_m3:
-                    st.metric(label="Metallurgical Cleanliness", value=impurity_status)
-            except Exception:
-                st.metric(label="Calculated Carbon Equivalent (CEV IIW)", value="N/A")
+        else:
+            st.info("No spectrometer report uploaded yet for this material.")
 
         with action_col:
             st.subheader("Dog Bone Tensile Test CSV Processing")
@@ -1202,7 +1390,7 @@ elif st.session_state.current_page == "RD_DECK":
                 plot_col, deck_col = st.columns([1, 1])
                 
                 with plot_col:
-                    st.subheader("Averaged Stress-Strain Trajectory")
+                    st.subheader("📈 Averaged Stress-Strain Trajectory")
                     fig, ax = plt.subplots(figsize=(6, 4.5))
                     
                     ax.plot(results["avg_strain"], results["avg_stress"] * 1000.0, label="Raw Engineering Average", color="navy", linestyle="--")
@@ -1225,10 +1413,11 @@ elif st.session_state.current_page == "RD_DECK":
                         file_name=f"MAT_024_{mat_info['grade']}_{int(mat_info['thickness']*100)}mm.k",
                         mime="text/plain"
                     )
- 
-# =========================================================================
-# ### SECTION 6: PRODUCTION QUALITY CONTROL HUB PAGE ###
-# =========================================================================
+#########################################################################################################################################################
+
+#########################################################################################################################################################
+##############################################  PRODUCTION HUB PAGE #####################################################################################
+
 elif st.session_state.current_page == "PROD_HUB":
     if st.button("← Return to Central Portal"):
         st.session_state.current_page = "HOME"
@@ -1236,10 +1425,9 @@ elif st.session_state.current_page == "PROD_HUB":
         st.rerun()
         
     family_name = st.session_state.active_family.title()
-    st.title(f"{family_name} — Production Quality Control Hub")
+    st.title(f"{family_name} — Production Hub")
     st.write("---")
     
-    # 1. FETCH DATA FIRST
     prod_df = fetch_cloud_materials(family=st.session_state.active_family)
     
     if not prod_df.empty:
@@ -1248,7 +1436,8 @@ elif st.session_state.current_page == "PROD_HUB":
         prod_df = prod_df[prod_df['calc_weight_kg'] > 0.001]
 
     if not prod_df.empty:
-        temp_storage_df = prod_df.copy()
+        temp_storage_df = prod_df.sort_values(by="id").reset_index(drop=True).copy()
+        temp_storage_df['seq_id'] = temp_storage_df.index + 1
         
         # Filter out parent lots that have been split into children
         split_fathers = temp_storage_df[
@@ -1259,46 +1448,32 @@ elif st.session_state.current_page == "PROD_HUB":
         
         temp_storage_df = temp_storage_df[~temp_storage_df['lotto_number'].astype(str).isin(split_fathers)]
         
-        # Use ONLY Lotto Father (lotto_number) for Warehouse Display
         temp_storage_df['active_lot'] = temp_storage_df['lotto_number'].apply(
             lambda x: str(x).strip() if pd.notna(x) and str(x).strip() not in ['', 'None', 'nan'] else "Unknown Lot"
         )
         
-        # Format each lot with its specific weight and length
         temp_storage_df['lot_detail'] = temp_storage_df.apply(
-            lambda row: f"{row['active_lot']} ({row['calc_weight_kg']/1000.0:.1f} t, {row.get('calc_length_mm', 0):.0f} mm)",
+            lambda row: f"<b>ID #{row['seq_id']}</b> : {row['active_lot']} <i>({row['calc_weight_kg']/1000.0:.1f} t, {row.get('calc_length_mm', 0):.0f} mm)</i>",
             axis=1
         )
         
-        # Group ONLY by grade, thickness, and length so they combine into one box
         grouped_storage = temp_storage_df.groupby(['grade', 'thickness', 'calc_length_mm']).agg(
-            coil_count=('active_lot', 'count'),  # Total count of coils in this group
+            coil_count=('active_lot', 'count'),
             total_weight=('calc_weight_kg', 'sum'),
-            lots=('lot_detail', lambda x: ", ".join(x.dropna().astype(str).tolist()))
+            lots=('lot_detail', lambda x: "<br/>".join(x.dropna().astype(str).tolist()))
         ).reset_index()
     else:
         grouped_storage = pd.DataFrame(columns=['grade', 'thickness', 'calc_length_mm', 'coil_count', 'total_weight', 'lots'])
 
-    # --- Warehouse Coil Situation Section ---
-    st.markdown("### 🏭 Warehouse Coil Situation")
+
+    st.markdown(" Warehouse Coil Situation")
+    st.caption("💡 *Click **'Manage Group'** on any card below to open the split and management window for its coils.*")
     
     if not grouped_storage.empty:
-        cards_html = ""
-        for idx, row in grouped_storage.iterrows():
-            grade = row['grade']
-            thick = row['thickness']
-            length = row['calc_length_mm']
-            count = row['coil_count']
-            
-            tot_w_kg = row['total_weight']
-            tot_w_tons = tot_w_kg / 1000.0
-            lots_list = row['lots']
-            
-            is_low = (tot_w_tons <= 20.0) or (count < 2)
-            border_color = "#ff4b4b" if is_low else "#2e7d32"
-            bg_color = "#fff5f5" if is_low else "#f1f8e9"
-            
-            coil_svg = """<svg width="75" height="62" viewBox="0 0 120 100" style="margin: 0 4px 4px 0; filter: drop-shadow(1px 2px 2px rgba(0,0,0,0.15));">
+        cols_per_row = 3
+        card_rows = [grouped_storage.iloc[i:i+cols_per_row] for i in range(0, len(grouped_storage), cols_per_row)]
+        
+        coil_svg = """<svg width="75" height="62" viewBox="0 0 120 100" style="margin: 0 4px 4px 0; filter: drop-shadow(1px 2px 2px rgba(0,0,0,0.15));">
     <ellipse cx="40" cy="50" rx="30" ry="42" fill="#d0d0d0" stroke="#444" stroke-width="4"/>
     <path d="M 40 8 L 85 8 C 98 8, 98 92, 85 92 L 40 92" fill="#e8e8e8" stroke="#444" stroke-width="4"/>
     <path d="M 25 22 L 70 22" stroke="#222" stroke-width="5" stroke-linecap="round"/>
@@ -1307,35 +1482,168 @@ elif st.session_state.current_page == "PROD_HUB":
     <ellipse cx="85" cy="50" rx="10" ry="30" fill="#e0e0e0" stroke="#666" stroke-width="2"/>
     <ellipse cx="85" cy="50" rx="5" ry="15" fill="#333"/>
 </svg>"""
-            coil_icons_html = "".join([coil_svg for _ in range(int(count))])
-            
-            cards_html += f"""<div style="border: 2px solid {border_color}; background-color: {bg_color}; padding: 12px; border-radius: 8px; text-align: left; box-shadow: 0 2px 4px rgba(0,0,0,0.04); display: inline-block; width: 270px; vertical-align: top; margin: 6px;">
-<div style="font-weight: bold; color: #111; font-size: 15px; margin-bottom: 8px;">
+
+        for row_idx, row_df in enumerate(card_rows):
+            grid_cols = st.columns(cols_per_row)
+            for col_idx, (_, row) in enumerate(row_df.iterrows()):
+                with grid_cols[col_idx]:
+                    grade = row['grade']
+                    thick = row['thickness']
+                    length = row['calc_length_mm']
+                    count = row['coil_count']
+                    
+                    tot_w_kg = row['total_weight']
+                    tot_w_tons = tot_w_kg / 1000.0
+                    lots_list = row['lots']
+                    
+                    is_low = (tot_w_tons <= 20.0) or (count < 2)
+                    border_color = "#ff4b4b" if is_low else "#2e7d32"
+                    bg_color = "#fff5f5" if is_low else "#f1f8e9"
+                    
+                    coil_icons_html = "".join([coil_svg for _ in range(int(count))])
+                    
+                    card_html = f"""<div style="border: 2px solid {border_color}; background-color: {bg_color}; padding: 14px; border-radius: 8px; text-align: left; box-shadow: 0 2px 4px rgba(0,0,0,0.06); width: 100%; box-sizing: border-box; margin-bottom: 6px;">
+<div style="font-weight: bold; color: #111; font-size: 16px; margin-bottom: 8px;">
 {grade} | {thick} mm | {length:.0f} mm
 </div>
 <div style="margin-bottom: 8px; display: flex; justify-content: flex-start; align-items: center; flex-wrap: wrap;">
 {coil_icons_html}
 </div>
-<div style="font-size: 13px; color: #333; margin-bottom: 4px;">
+<div style="font-size: 13px; color: #333; margin-bottom: 8px;">
 <b>Coils:</b> <span style="color: {'#ff4b4b' if count < 2 else '#1f77b4'}; font-weight: bold;">{count}</span> | <b>Weight:</b> <span style="color: {border_color}; font-weight: bold;">{tot_w_tons:.3f} t</span>
 </div>
-<div style="font-size: 11px; color: #666; line-height: 1.4; max-height: 60px; overflow-y: auto;">
-<b>LOTTO:</b><br/>{lots_list.replace(', ', '<br/>')}
+<div style="font-size: 12px; color: #111; line-height: 1.6; max-height: 90px; overflow-y: auto; background: rgba(255,255,255,0.85); padding: 8px; border-radius: 6px; border: 1px solid #ddd;">
+<b style="color: #000; font-size: 12px;">LOTTO & ID DETAILS:</b><br/>{lots_list}
 </div>
 </div>"""
-
-        st.markdown(f"""<div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px;">
-{cards_html}
-</div>""", unsafe_allow_html=True)
+                    
+                    with st.container():
+                        st.markdown(card_html, unsafe_allow_html=True)
+                        
+                        group_rows = temp_storage_df[
+                            (temp_storage_df['grade'] == grade) & 
+                            (temp_storage_df['thickness'] == thick)
+                        ]
+                        
+                        btn_key = f"manage_group_btn_{row_idx}_{col_idx}"
+                        if st.button(f"⚙️ Manage / Split Group", key=btn_key, use_container_width=True):
+                            open_coil_management_dialog(grade, thick, length, group_rows)
     else:
         st.info("No active coils currently in storage.")
     
     st.write("---")
 
-    # --- Production Batch Queue Header ---
-    st.markdown(f"### 📦 Production Batch Queue ({family_name})")
-    st.caption("💡 *Rows highlighted in light red indicate any Lotto (Father or Son) at or below the 20 Ton low-stock threshold.*")
-    search_query = st.text_input("🔍 Search by Lotto Number (Father or Component Code)", value="")
+
+    with st.container(border=True):
+        st.markdown(" Quality Verification Hub (Tensile Testing)")
+        st.caption(" *Input 3 tensile test measurements. Fields start blank. Includes a professional 10 MPa / 5% industrial engineering allowance buffer.*")
+
+        if not prod_df.empty:
+            qv_col1, qv_col2 = st.columns([1, 1.5], gap="large")
+            
+            with qv_col1:
+                st.markdown(" Select Batch")
+                temp_qv_df = prod_df.sort_values(by="id").reset_index(drop=True)
+                temp_qv_df['seq_id'] = temp_qv_df.index + 1
+                
+                qv_options = {}
+                for _, r in temp_qv_df.iterrows():
+                    seq_id = int(r["seq_id"])
+                    real_db_id = int(r["id"])
+                    g_name = str(r.get("grade", ""))
+                    l_num = str(r.get("lotto_number", ""))
+                    l_label = l_num if l_num != "None" and l_num != "" else f"DB-{real_db_id}"
+                    qv_options[f"ID #{seq_id} | {g_name} | Lotto: {l_label}"] = real_db_id
+                
+                selected_qv_label = st.selectbox("Choose Coil for Lab Verification", options=list(qv_options.keys()), key="qv_batch_select")
+                selected_qv_id = qv_options[selected_qv_label]
+                
+                qv_row = prod_df[prod_df['id'] == selected_qv_id].iloc[0]
+                
+                st.info(f"""
+                **📋 Certificate & EN10025 Reference Targets:**
+                - **Min Yield ($\sigma_{{yield}}$):** **{qv_row.get('yield_mpa', 0.0)} MPa**
+                - **Min UTS ($\sigma_{{uts}}$):** **{qv_row.get('uts_mpa', 0.0)} MPa**
+                - **Min Elongation:** **{qv_row.get('elongation_pct', 0.0)} %**
+                """)
+
+            with qv_col2:
+                st.markdown("#### 📊 Enter 3 Tensile Test Samples")
+                
+                with st.form(key=f"quality_verification_form_{selected_qv_id}"):
+                    st.markdown("**1. Yield Stress ($\sigma_{yield}$ - MPa)**")
+                    y1, y2, y3 = st.columns(3)
+                    with y1: t1_y = st.number_input("Test 1", value=None, step=1.0, format="%.1f", placeholder="e.g. 525.0", key=f"t1_y_{selected_qv_id}")
+                    with y2: t2_y = st.number_input("Test 2", value=None, step=1.0, format="%.1f", placeholder="e.g. 525.0", key=f"t2_y_{selected_qv_id}")
+                    with y3: t3_y = st.number_input("Test 3", value=None, step=1.0, format="%.1f", placeholder="e.g. 525.0", key=f"t3_y_{selected_qv_id}")
+                    
+                    st.markdown("**2. Ultimate Tensile Strength ($\sigma_{uts}$ - MPa)**")
+                    u1, u2, u3 = st.columns(3)
+                    with u1: t1_u = st.number_input("Test 1", value=None, step=1.0, format="%.1f", placeholder="e.g. 580.0", key=f"t1_u_{selected_qv_id}")
+                    with u2: t2_u = st.number_input("Test 2", value=None, step=1.0, format="%.1f", placeholder="e.g. 580.0", key=f"t2_u_{selected_qv_id}")
+                    with u3: t3_u = st.number_input("Test 3", value=None, step=1.0, format="%.1f", placeholder="e.g. 580.0", key=f"t3_u_{selected_qv_id}")
+                    
+                    st.markdown("**3. Elongation Percentage (%)**")
+                    e1, e2, e3 = st.columns(3)
+                    with e1: t1_e = st.number_input("Test 1", value=None, step=0.1, format="%.1f", placeholder="e.g. 24.0", key=f"t1_e_{selected_qv_id}")
+                    with e2: t2_e = st.number_input("Test 2", value=None, step=0.1, format="%.1f", placeholder="e.g. 24.0", key=f"t2_e_{selected_qv_id}")
+                    with e3: t3_e = st.number_input("Test 3", value=None, step=0.1, format="%.1f", placeholder="e.g. 24.0", key=f"t3_e_{selected_qv_id}")
+                    
+                    submit_verification = st.form_submit_button(" Calculate Averages & Evaluate Status", use_container_width=True)
+
+                    
+                    if submit_verification:
+                        inputs_list = [t1_y, t2_y, t3_y, t1_u, t2_u, t3_u, t1_e, t2_e, t3_e]
+                        if any(val is None for val in inputs_list):
+                            st.warning(" Please fill in all 9 tensile test input fields before evaluating.")
+                        else:
+                            avg_y = (t1_y + t2_y + t3_y) / 3.0
+                            avg_u = (t1_u + t2_u + t3_u) / 3.0
+                            avg_e = (t1_e + t2_e + t3_e) / 3.0
+                            
+                            ref_y = float(qv_row.get('yield_mpa', 0.0))
+                            ref_u = float(qv_row.get('uts_mpa', 0.0))
+                            ref_e = float(qv_row.get('elongation_pct', 0.0))
+                        
+                        #EZIO  tensile testing values 
+                        stress_allowance_mpa = 30.0
+                        elong_allowance_pct = 7.0
+
+                        effective_ref_y = ref_y - stress_allowance_mpa
+                        effective_ref_u = ref_u - stress_allowance_mpa
+                        effective_ref_e = ref_e - elong_allowance_pct
+
+                        if avg_y >= ref_y and avg_u >= ref_u and avg_e >= ref_e:
+                            new_status_val = "Verified ✅"
+                            st.success(f"✅ **Fully Verified (Passed)** — Averages meet standard requirements!")
+                        elif avg_y >= effective_ref_y and avg_u >= effective_ref_u and avg_e >= effective_ref_e:
+                            new_status_val = "Verified ✅"
+                            st.info(f"⚠️ **Conditionally Verified (Within Allowance)** — Averages are slightly below standard targets but within the acceptable 10 MPa / 5.0% engineering tolerance buffer.")
+                        else:
+                            new_status_val = "Non-Compliant / Rejected ❌"
+                            st.error(f"❌ **Non-Compliant / Rejected (Failed)** — Averages exceed the allowable engineering tolerance limits.")
+                        
+                        # --- SAVE STATUS TO DATABASE INSTANTLY ---
+                        with conn.session as s:
+                            s.execute(
+                                text("UPDATE materials SET quality_status = :qstat WHERE id = :id"),
+                                {"qstat": new_status_val, "id": int(selected_qv_id)}
+                            )
+                            s.commit()
+                        
+                        st.toast(f"Status updated to '{new_status_val}' in database!", icon="💾")
+                        st.cache_data.clear()
+                        st.rerun()
+                        
+        else:
+            st.info("No batches available for quality verification.")
+
+    st.write("---")
+
+
+    st.markdown(f"###  Production Batch Queue ({family_name})")
+    st.caption("💡 *Rows highlighted in light red indicate any Lotto at or below the 20 Ton low-stock threshold.*")
+    search_query = st.text_input("🔍 Search by ID, Lotto Number, or Component Code", value="")
     
     dropdown_options_df = pd.DataFrame()
     
@@ -1350,47 +1658,53 @@ elif st.session_state.current_page == "PROD_HUB":
         display_df = prod_df[[
             "id", "grade", "thickness", "yield_mpa", "uts_mpa", "elongation_pct", 
             "current_weight_tons", "current_length_mm", "lotto_number", "lotto_figlio", "provider", 
-            "rd_remaining_weight_kg", "is_promoted"
+            "rd_remaining_weight_kg", "is_promoted", "quality_status"
         ]].copy()
         
+        display_df = display_df.sort_values(by="id").reset_index(drop=True)
+        
+        display_df["ID"] = display_df.index + 1
+        display_df["real_db_id"] = display_df["id"]
+
+    
         def determine_status(row):
-            if row["rd_remaining_weight_kg"] is not None and float(row["rd_remaining_weight_kg"]) <= 0.001:
+            q_status = row.get("quality_status")
+            if q_status and pd.notna(q_status) and str(q_status).strip() != "":
+                return str(q_status)
+            elif row["rd_remaining_weight_kg"] is not None and float(row["rd_remaining_weight_kg"]) <= 0.001:
                 return "🔴 Not Available"
             elif row["is_promoted"] == 1:
-                return "🚀 R&D Promoted"
+                return "🔬 R&D"
             else:
-                return "🟢 In Production"
+                return "🟢 Standby"
 
         display_df["Status"] = display_df.apply(determine_status, axis=1)
-        display_df = display_df.drop(columns=["rd_remaining_weight_kg", "is_promoted"])
+        display_df = display_df.drop(columns=["id", "rd_remaining_weight_kg", "is_promoted", "quality_status"])
         
         display_df = display_df.rename(columns={
-            "id": "db_id",
             "current_weight_tons": "Remaining Weight [TON]",
             "current_length_mm": "Remaining Length [mm]",
             "lotto_number": "Lotto Father",
             "lotto_figlio": "Component Code"
         })
         
-        # 1. Apply search filter
         if search_query.strip():
             q = search_query.strip().lower()
-            mask = display_df["Lotto Father"].astype(str).str.lower().str.contains(q) | display_df["Component Code"].astype(str).str.lower().str.contains(q)
+            mask = (
+                display_df["ID"].astype(str).str.lower().str.contains(q) |
+                display_df["Lotto Father"].astype(str).str.lower().str.contains(q) | 
+                display_df["Component Code"].astype(str).str.lower().str.contains(q)
+            )
             display_df = display_df[mask]
 
-        display_df = display_df.sort_values(by="db_id")
-
-        # 2. Keep copy for dropdown options (retaining hidden db_id)
         dropdown_options_df = display_df.copy()
 
-        # 3. Create sequential index starting from 1 for visual display
-        display_df = display_df.reset_index(drop=True)
-        display_df.index = display_df.index + 1
-        display_df.index.name = "No."
-
-        # Drop db_id from visual table so it doesn't show up in the columns
-        table_display_view = display_df.drop(columns=["db_id"])
-            
+        cols_order = [
+            "ID", "grade", "thickness", "yield_mpa", "uts_mpa", "elongation_pct", 
+            "Remaining Weight [TON]", "Remaining Length [mm]", "Lotto Father", "Component Code", "provider", "Status", "real_db_id"
+        ]
+        table_display_view = display_df[[c for c in cols_order if c in display_df.columns and c != "real_db_id"]]
+        #EZIO LOW STOCK 
         def highlight_low_stock(row):
             w_tons = row.get('Remaining Weight [TON]', 0)
             if 0.0001 < w_tons <= 20.0:
@@ -1398,31 +1712,30 @@ elif st.session_state.current_page == "PROD_HUB":
             return [''] * len(row)
 
         styled_df = table_display_view.style.apply(highlight_low_stock, axis=1)
-        st.dataframe(styled_df, use_container_width=True)
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
         st.info("No production batches in database queue.")
 
     st.write("---")
     
-    # 3. ACTIONS, EDITS, AND SPLIT COIL CONTROLS
-    p_col1, p_col2 = st.columns([1.2, 0.8])
+    st.markdown(" Actions & Edits")
     
-    with p_col2:
-        st.subheader("Actions & Edits")
-        
+    with st.container(border=True):
         table_df = dropdown_options_df if not dropdown_options_df.empty else pd.DataFrame()
         
         if not table_df.empty:
             batch_options = {}
-            for _, row in table_df.iterrows():
-                db_id = int(row["db_id"])
+            default_index = 0
+            preset_id = st.session_state.get("preset_selected_id", None)
+            
+            for seq_idx, (_, row) in enumerate(table_df.iterrows(), 1):
+                db_id = int(row["real_db_id"])
                 grade = str(row.get("grade", ""))
-                father = row.get("Lotto Father", "")
-                son = row.get("Component Code", "")
-                provider = str(row.get("provider", ""))
+                father = str(row.get("Lotto Father", ""))
+                son = str(row.get("Component Code", ""))
                 
-                father_str = str(father) if pd.notna(father) and str(father) != "None" else ""
-                son_str = str(son) if pd.notna(son) and str(son) != "None" else ""
+                father_str = father if father != "None" and father != "" else ""
+                son_str = son if son != "None" and son != "" else ""
                 
                 if father_str and son_str:
                     lotto_str = f"{father_str} → {son_str}"
@@ -1431,29 +1744,40 @@ elif st.session_state.current_page == "PROD_HUB":
                 else:
                     lotto_str = father_str if father_str else "No Lotto"
                     
-                label = f"{grade} | Lotto: {lotto_str} | Prov: {provider}"
+                label = f"ID #{seq_idx} | {grade} | Lotto: {lotto_str}"
                 batch_options[label] = db_id
+                
+                if preset_id is not None and db_id == int(preset_id):
+                    default_index = seq_idx - 1
 
-            selected_label = st.selectbox("Select Production Batch", options=list(batch_options.keys()))
-            selected_prod_id = batch_options[selected_label]  # True database ID linked behind the scenes
+            selected_label = st.selectbox(
+                "Select Production Batch", 
+                options=list(batch_options.keys()), 
+                index=default_index,
+                key="actions_batch_select_box"
+            )
+            selected_prod_id = batch_options[selected_label]
             
+            if preset_id is not None:
+                st.session_state.preset_selected_id = None
+
             matching_rows = prod_df[prod_df['id'] == selected_prod_id]
             if not matching_rows.empty:
                 selected_row = matching_rows.iloc[0]
                 is_already_promoted = (selected_row.get("is_promoted", 0) == 1)
 
-                b1, b2 = st.columns(2)
-                with b1:
+                act_col1, act_col2 = st.columns(2)
+                with act_col1:
                     if is_already_promoted:
                         st.info("Already in R&D")
                     else:
-                        if st.button("Move to R&D", use_container_width=True):
+                        if st.button(" Move to R&D", use_container_width=True):
                             promote_cloud_material(selected_prod_id)
                             st.success("Batch promoted to R&D!")
                             st.cache_data.clear()
                             st.rerun()
                             
-                with b2:
+                with act_col2:
                     if "confirm_delete_id" not in st.session_state:
                         st.session_state.confirm_delete_id = None
 
@@ -1518,7 +1842,7 @@ elif st.session_state.current_page == "PROD_HUB":
                             st.cache_data.clear()
                             st.rerun()
 
-                with st.expander("✂️ Split Coil (Father -> Sons)", expanded=False):
+                with st.expander(" Split Coil (Father -> Sons)", expanded=False):
                     rem_w_val = selected_row.get("rd_remaining_weight_kg")
                     current_w_kg = float(rem_w_val) if pd.notna(rem_w_val) else float(selected_row.get("coil_weight_kg", 0.0))
                     current_w_tons = current_w_kg / 1000.0
@@ -1558,14 +1882,13 @@ elif st.session_state.current_page == "PROD_HUB":
                             if total_l > current_l:
                                 st.error("Sum of child lengths exceeds parent remaining length!")
                             else:
-                                # Updated split call with auto_promote_rd=True so child components go straight to R&D
                                 split_cloud_material(selected_prod_id, children_inputs, auto_promote_rd=True)
                                 for idx in range(int(num_children)):
                                     key_l = f"split_l_{selected_prod_id}_{idx}"
                                     key_lot = f"split_lotto_{selected_prod_id}_{idx}"
                                     if key_l in st.session_state: del st.session_state[key_l]
                                     if key_lot in st.session_state: del st.session_state[key_lot]
-                                st.success(f"Coil successfully split and new components automatically moved to R&D!")
+                                st.success(f"Coil successfully split, automatically pushed to R&D status!")
                                 st.cache_data.clear()
                                 st.rerun()
             else:
@@ -1575,8 +1898,8 @@ elif st.session_state.current_page == "PROD_HUB":
 
     st.write("---")
     
-    # 4. MANUAL FORM ENTRY & FILE UPLOAD
-    with st.expander("✍ Manual Form Entry & File Upload (New Batch)", expanded=False):
+ 
+    with st.expander(" Manual Form Entry & File Upload (New Batch)", expanded=False):
         entry_tab1, entry_tab2 = st.tabs(["Manual Form Entry", "📁 File Upload (.txt / .csv / .xlsx)"])
         
         with entry_tab1:
@@ -1613,7 +1936,7 @@ elif st.session_state.current_page == "PROD_HUB":
                         coil_weight=coil_weight_kg_val,
                         coil_length_mm=coil_length
                     )
-                    st.toast("✅ Batch registered into Production database!")
+                    st.toast("✅ Batch registered into Production database with 'Standby' status!")
                     st.cache_data.clear()
                     st.rerun()
 
@@ -1638,7 +1961,6 @@ elif st.session_state.current_page == "PROD_HUB":
                         if "coil_weight_kg" in df_upload.columns and "coil_weight_TON" not in df_upload.columns:
                             df_upload = df_upload.rename(columns={"coil_weight_kg": "coil_weight_TON"})
 
-                    # Clean string columns
                     for col in ["grade", "lotto_number", "lotto_figlio", "provider"]:
                         if col in df_upload.columns:
                             df_upload[col] = df_upload[col].astype(str).str.strip()
@@ -1650,11 +1972,9 @@ elif st.session_state.current_page == "PROD_HUB":
                         success_count = 0
                         for _, r in df_upload.iterrows():
                             try:
-                                # Safely parse numeric values, avoiding string 'nan' bugs
                                 def safe_float(val):
                                     if pd.isna(val) or str(val).strip().lower() in ["nan", "none", ""]:
                                         return 0.0
-                                    # Strip out any trailing unit letters if present (e.g. "25.0 t")
                                     cleaned = ''.join(c for c in str(val) if c.isdigit() or c in '.-')
                                     return float(cleaned) if cleaned else 0.0
 
@@ -1667,35 +1987,32 @@ elif st.session_state.current_page == "PROD_HUB":
                                 lotto_num = r.get("lotto_number")
                                 lotto_son = r.get("lotto_figlio")
                                 provider = str(r.get("provider", ""))
+                                w_tons = safe_float(r.get("coil_weight_TON", 0.0))
+                                l_mm = safe_float(r.get("coil_length_mm", 0.0))
                                 
-                                raw_weight_ton = safe_float(r.get("coil_weight_TON", 0.0))
-                                weight_kg_val = raw_weight_ton * 1000.0
-                                length_mm_val = safe_float(r.get("coil_length_mm", 0.0))
-
                                 insert_cloud_material(
-                                    grade, thickness, yield_val, uts_val, elong_val, 
-                                    lotto_padre=lotto_num, lotto_figlio=lotto_son, provider=provider, 
-                                    family=st.session_state.active_family,
-                                    cert_path=None,
-                                    coil_weight=weight_kg_val,
-                                    coil_length_mm=length_mm_val
+                                    grade=grade, thickness=thickness, yield_mpa=yield_val, uts_mpa=uts_val, elongation=elong_val,
+                                    lotto_padre=lotto_num, lotto_figlio=lotto_son, provider=provider,
+                                    family=st.session_state.active_family, cert_path=None,
+                                    coil_weight=w_tons * 1000.0, coil_length_mm=l_mm
                                 )
                                 success_count += 1
-                            except Exception as row_err:
-                                st.warning(f"Skipped a row due to parsing error: {row_err}")
-
-                        st.toast(f"Successfully imported {success_count} production batches!", icon="🚀")
-                        st.cache_data.clear()
-                        st.session_state.file_uploader_key += 1
-                        st.rerun()
+                            except Exception as ex:
+                                st.error(f"Error importing row: {ex}")
+                        
+                        if success_count > 0:
+                            st.success(f"Successfully imported {success_count} batches!")
+                            st.cache_data.clear()
+                            st.rerun()
                 except Exception as e:
-                    st.error(f"Error reading file structure: {e}")
+                    st.error(f"Error reading upload file: {e}")
 
 
+#########################################################################################################################################################
 
-# =========================================================================
-# ### SECTION : AREA CRUSHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH ###
-# =========================================================================
+#########################################################################################################################################################
+##############################################  AREA CRUSH PAGE #########################################################################################
+
 elif st.session_state.current_page == "area_crush":
     if st.button("← Return to Central Portal"):
         st.session_state.current_page = "HOME"
@@ -1728,7 +2045,7 @@ elif st.session_state.current_page == "area_crush":
         </style>
     """, unsafe_allow_html=True)
 
-    st.markdown(f"### 💥 Area Crush — {st.session_state.active_family} Family")
+    st.markdown(f" Area Crush — {st.session_state.active_family} Family")
 
     crush_df = fetch_cloud_materials(family=st.session_state.active_family, hub_section="CRUSH")
 
@@ -1803,7 +2120,7 @@ elif st.session_state.current_page == "area_crush":
 
     st.write("---")
 
-    st.markdown("#### 📥 Manual Entry or .txt Batch Import")
+    st.markdown(" 📥 Manual Entry or .txt Batch Import")
     entry_mode = st.radio("Entry Method", ["Manual Form", "Upload .txt File"], horizontal=True, key="crush_mode")
     
     if entry_mode == "Manual Form":
