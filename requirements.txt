@@ -2,7 +2,6 @@ streamlit
 pandas
 numpy
 matplotlib
-psycopg2
 psycopg2-binary
 sqlalchemy
 supabase
