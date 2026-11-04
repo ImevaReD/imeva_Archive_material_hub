@@ -1202,7 +1202,7 @@ elif st.session_state.current_page == "RD_DECK":
                 plot_col, deck_col = st.columns([1, 1])
                 
                 with plot_col:
-                    st.subheader("📈 Averaged Stress-Strain Trajectory")
+                    st.subheader("Averaged Stress-Strain Trajectory")
                     fig, ax = plt.subplots(figsize=(6, 4.5))
                     
                     ax.plot(results["avg_strain"], results["avg_stress"] * 1000.0, label="Raw Engineering Average", color="navy", linestyle="--")
@@ -1250,14 +1250,6 @@ elif st.session_state.current_page == "PROD_HUB":
     if not prod_df.empty:
         temp_storage_df = prod_df.copy()
         
-        # --- Robust Cleaning for Grouping Fields ---
-        temp_storage_df['grade'] = temp_storage_df['grade'].fillna('Unknown Grade').astype(str).str.strip()
-        temp_storage_df['grade'] = temp_storage_df['grade'].apply(lambda x: x if x and x.lower() != 'nan' else 'Unknown Grade')
-        
-        temp_storage_df['thickness'] = pd.to_numeric(temp_storage_df['thickness'], errors='coerce').fillna(0.0)
-        temp_storage_df['calc_length_mm'] = pd.to_numeric(temp_storage_df['calc_length_mm'], errors='coerce').fillna(0.0)
-        temp_storage_df['provider'] = temp_storage_df['provider'].fillna('Unknown Provider').astype(str).str.strip()
-        
         # Filter out parent lots that have been split into children
         split_fathers = temp_storage_df[
             temp_storage_df['lotto_figlio'].notna() & 
@@ -1272,13 +1264,13 @@ elif st.session_state.current_page == "PROD_HUB":
             lambda x: str(x).strip() if pd.notna(x) and str(x).strip() not in ['', 'None', 'nan'] else "Unknown Lot"
         )
         
-        # Format each lot with its specific weight, length, and provider info
+        # Format each lot with its specific weight and length
         temp_storage_df['lot_detail'] = temp_storage_df.apply(
-            lambda row: f"{row['active_lot']} | Prov: {row['provider']} ({row['calc_weight_kg']/1000.0:.1f} t, {row.get('calc_length_mm', 0):.0f} mm)",
+            lambda row: f"{row['active_lot']} ({row['calc_weight_kg']/1000.0:.1f} t, {row.get('calc_length_mm', 0):.0f} mm)",
             axis=1
         )
         
-        # Group by grade, thickness, and length so they combine into one box
+        # Group ONLY by grade, thickness, and length so they combine into one box
         grouped_storage = temp_storage_df.groupby(['grade', 'thickness', 'calc_length_mm']).agg(
             coil_count=('active_lot', 'count'),  # Total count of coils in this group
             total_weight=('calc_weight_kg', 'sum'),
@@ -1317,7 +1309,7 @@ elif st.session_state.current_page == "PROD_HUB":
 </svg>"""
             coil_icons_html = "".join([coil_svg for _ in range(int(count))])
             
-            cards_html += f"""<div style="border: 2px solid {border_color}; background-color: {bg_color}; padding: 12px; border-radius: 8px; text-align: left; box-shadow: 0 2px 4px rgba(0,0,0,0.04); display: inline-block; width: 290px; vertical-align: top; margin: 6px;">
+            cards_html += f"""<div style="border: 2px solid {border_color}; background-color: {bg_color}; padding: 12px; border-radius: 8px; text-align: left; box-shadow: 0 2px 4px rgba(0,0,0,0.04); display: inline-block; width: 270px; vertical-align: top; margin: 6px;">
 <div style="font-weight: bold; color: #111; font-size: 15px; margin-bottom: 8px;">
 {grade} | {thick} mm | {length:.0f} mm
 </div>
@@ -1327,8 +1319,8 @@ elif st.session_state.current_page == "PROD_HUB":
 <div style="font-size: 13px; color: #333; margin-bottom: 4px;">
 <b>Coils:</b> <span style="color: {'#ff4b4b' if count < 2 else '#1f77b4'}; font-weight: bold;">{count}</span> | <b>Weight:</b> <span style="color: {border_color}; font-weight: bold;">{tot_w_tons:.3f} t</span>
 </div>
-<div style="font-size: 11px; color: #666; line-height: 1.4; max-height: 70px; overflow-y: auto;">
-<b>LOT DETAILS:</b><br/>{lots_list.replace(', ', '<br/>')}
+<div style="font-size: 11px; color: #666; line-height: 1.4; max-height: 60px; overflow-y: auto;">
+<b>LOTTO:</b><br/>{lots_list.replace(', ', '<br/>')}
 </div>
 </div>"""
 
@@ -1336,7 +1328,7 @@ elif st.session_state.current_page == "PROD_HUB":
 {cards_html}
 </div>""", unsafe_allow_html=True)
     else:
-        st.info("No active coils currently in storage. Please add a batch via manual entry or file upload below.")
+        st.info("No active coils currently in storage.")
     
     st.write("---")
 
@@ -1646,27 +1638,53 @@ elif st.session_state.current_page == "PROD_HUB":
                         if "coil_weight_kg" in df_upload.columns and "coil_weight_TON" not in df_upload.columns:
                             df_upload = df_upload.rename(columns={"coil_weight_kg": "coil_weight_TON"})
 
-                    for col in df_upload.select_dtypes(include=["object"]).columns:
-                        df_upload[col] = df_upload[col].astype(str).str.strip()
+                    # Clean string columns
+                    for col in ["grade", "lotto_number", "lotto_figlio", "provider"]:
+                        if col in df_upload.columns:
+                            df_upload[col] = df_upload[col].astype(str).str.strip()
+                            df_upload[col] = df_upload[col].apply(lambda x: None if x in ["nan", "None", ""] else x)
+
                     st.dataframe(df_upload, use_container_width=True, hide_index=True)
 
                     if st.button("Import Batches to Database", use_container_width=True):
+                        success_count = 0
                         for _, r in df_upload.iterrows():
-                            raw_weight_ton = r.get("coil_weight_TON", 0.0)
-                            weight_kg_val = float(raw_weight_ton if pd.notna(raw_weight_ton) else 0.0) * 1000.0
-                            insert_cloud_material(
-                                r["grade"], r["thickness"], 
-                                r["yield_mpa"] if "yield_mpa" in r else r.get("yield_ns", 0.0), 
-                                r["uts_mpa"] if "uts_mpa" in r else r.get("uts_ns", 0.0), 
-                                r["elongation_pct"] if "elongation_pct" in r else r.get("elong_ns", 0.0), 
-                                r.get("lotto_number"), r.get("lotto_figlio"), 
-                                r["provider"],
-                                family=st.session_state.active_family,
-                                cert_path=None,
-                                coil_weight=weight_kg_val,
-                                coil_length_mm=r.get("coil_length_mm", 0.0)
-                            )
-                        st.toast("Successfully imported production batches!", icon="🚀")
+                            try:
+                                # Safely parse numeric values, avoiding string 'nan' bugs
+                                def safe_float(val):
+                                    if pd.isna(val) or str(val).strip().lower() in ["nan", "none", ""]:
+                                        return 0.0
+                                    # Strip out any trailing unit letters if present (e.g. "25.0 t")
+                                    cleaned = ''.join(c for c in str(val) if c.isdigit() or c in '.-')
+                                    return float(cleaned) if cleaned else 0.0
+
+                                grade = str(r.get("grade", "Unknown"))
+                                thickness = safe_float(r.get("thickness", 0.0))
+                                yield_val = safe_float(r.get("yield_mpa") if "yield_mpa" in r else r.get("yield_ns", 0.0))
+                                uts_val = safe_float(r.get("uts_mpa") if "uts_mpa" in r else r.get("uts_ns", 0.0))
+                                elong_val = safe_float(r.get("elongation_pct") if "elongation_pct" in r else r.get("elong_ns", 0.0))
+                                
+                                lotto_num = r.get("lotto_number")
+                                lotto_son = r.get("lotto_figlio")
+                                provider = str(r.get("provider", ""))
+                                
+                                raw_weight_ton = safe_float(r.get("coil_weight_TON", 0.0))
+                                weight_kg_val = raw_weight_ton * 1000.0
+                                length_mm_val = safe_float(r.get("coil_length_mm", 0.0))
+
+                                insert_cloud_material(
+                                    grade, thickness, yield_val, uts_val, elong_val, 
+                                    lotto_padre=lotto_num, lotto_figlio=lotto_son, provider=provider, 
+                                    family=st.session_state.active_family,
+                                    cert_path=None,
+                                    coil_weight=weight_kg_val,
+                                    coil_length_mm=length_mm_val
+                                )
+                                success_count += 1
+                            except Exception as row_err:
+                                st.warning(f"Skipped a row due to parsing error: {row_err}")
+
+                        st.toast(f"Successfully imported {success_count} production batches!", icon="🚀")
                         st.cache_data.clear()
                         st.session_state.file_uploader_key += 1
                         st.rerun()
