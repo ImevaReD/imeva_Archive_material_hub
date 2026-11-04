@@ -2,7 +2,7 @@ streamlit
 pandas
 numpy
 matplotlib
-psycopg2-binary
+psycopg[binary]
 sqlalchemy
 supabase
 plotly
