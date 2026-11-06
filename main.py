@@ -1297,7 +1297,6 @@ elif st.session_state.current_page == "RD_DECK":
                         with open(temp_path, "wb") as f:
                             f.write(uploaded_file.getbuffer())
                         runs_data.append(convert_curve(temp_path))
-                    
                     results_computed = average_curves(runs_data)
                     curve_payload_dict = {
                         "strain": results_computed["eng_strain_clean"].tolist() if hasattr(results_computed["eng_strain_clean"], "tolist") else list(results_computed["eng_strain_clean"]),
@@ -1312,7 +1311,6 @@ elif st.session_state.current_page == "RD_DECK":
                         "eng_stress_clean": results_computed["eng_stress_clean"].tolist() if hasattr(results_computed["eng_stress_clean"], "tolist") else list(results_computed["eng_stress_clean"]),
                         "deck": results_computed["deck"]
                     }
-                    
                     st.session_state.experimental_curves[mat_id] = {
                         "strain": np.array(curve_payload_dict["strain"]),
                         "stress_MPa": np.array(curve_payload_dict["stress_MPa"]),
@@ -1326,7 +1324,6 @@ elif st.session_state.current_page == "RD_DECK":
                         "eng_stress_clean": np.array(curve_payload_dict["eng_stress_clean"]),
                         "deck": curve_payload_dict["deck"]
                     }
-                    
                     try:
                         mech_json_payload = json.dumps(curve_payload_dict)
                         with conn.session as s:
@@ -1356,7 +1353,6 @@ elif st.session_state.current_page == "RD_DECK":
                             st.rerun() 
                     except Exception as db_err:
                         st.warning(f"Cloud sync error for mechanical data: {db_err}")
-
             if mat_id not in st.session_state.experimental_curves:
                 saved_json = mat_info.get("experimental_curves_json") if "experimental_curves_json" in mat_info else None
                 if saved_json:
@@ -1374,9 +1370,7 @@ elif st.session_state.current_page == "RD_DECK":
                         "eng_stress_clean": np.array(loaded_dict["eng_stress_clean"]),
                         "deck": loaded_dict["deck"]
                     }
-
             results = st.session_state.experimental_curves.get(mat_id, None)
-
             if results:
                 st.metric(label="Calculated Young's Modulus (E)", value=f"{results['E_GPa']:.2f} GPa")
                 st.metric(label="Calculated Lab Yield Avg (sigy)", value=f"{results['sigy_MPa']:.1f} MPa")
@@ -1417,7 +1411,6 @@ elif st.session_state.current_page == "RD_DECK":
 
 #########################################################################################################################################################
 ##############################################  PRODUCTION HUB PAGE #####################################################################################
-
 elif st.session_state.current_page == "PROD_HUB":
     if st.button("← Return to Central Portal"):
         st.session_state.current_page = "HOME"
@@ -1434,7 +1427,6 @@ elif st.session_state.current_page == "PROD_HUB":
         prod_df['calc_weight_kg'] = prod_df['rd_remaining_weight_kg'].fillna(prod_df['coil_weight_kg'])
         prod_df['calc_length_mm'] = prod_df['rd_remaining_length_mm'].fillna(prod_df['coil_length_mm'])
         prod_df = prod_df[prod_df['calc_weight_kg'] > 0.001]
-
     if not prod_df.empty:
         temp_storage_df = prod_df.sort_values(by="id").reset_index(drop=True).copy()
         temp_storage_df['seq_id'] = temp_storage_df.index + 1
@@ -1468,7 +1460,6 @@ elif st.session_state.current_page == "PROD_HUB":
 
     st.markdown(" Warehouse Coil Situation")
     st.caption("💡 *Click **'Manage Group'** on any card below to open the split and management window for its coils.*")
-    
     if not grouped_storage.empty:
         cols_per_row = 3
         card_rows = [grouped_storage.iloc[i:i+cols_per_row] for i in range(0, len(grouped_storage), cols_per_row)]
@@ -1491,15 +1482,13 @@ elif st.session_state.current_page == "PROD_HUB":
                     thick = row['thickness']
                     length = row['calc_length_mm']
                     count = row['coil_count']
-                    
                     tot_w_kg = row['total_weight']
                     tot_w_tons = tot_w_kg / 1000.0
                     lots_list = row['lots']
                     
                     is_low = (tot_w_tons <= 20.0) or (count < 2)
                     border_color = "#ff4b4b" if is_low else "#2e7d32"
-                    bg_color = "#fff5f5" if is_low else "#f1f8e9"
-                    
+                    bg_color = "#fff5f5" if is_low else "#f1f8e9"  
                     coil_icons_html = "".join([coil_svg for _ in range(int(count))])
                     
                     card_html = f"""<div style="border: 2px solid {border_color}; background-color: {bg_color}; padding: 14px; border-radius: 8px; text-align: left; box-shadow: 0 2px 4px rgba(0,0,0,0.06); width: 100%; box-sizing: border-box; margin-bottom: 6px;">
@@ -1515,8 +1504,7 @@ elif st.session_state.current_page == "PROD_HUB":
 <div style="font-size: 12px; color: #111; line-height: 1.6; max-height: 90px; overflow-y: auto; background: rgba(255,255,255,0.85); padding: 8px; border-radius: 6px; border: 1px solid #ddd;">
 <b style="color: #000; font-size: 12px;">LOTTO & ID DETAILS:</b><br/>{lots_list}
 </div>
-</div>"""
-                    
+</div>"""      
                     with st.container():
                         st.markdown(card_html, unsafe_allow_html=True)
                         
@@ -1532,8 +1520,6 @@ elif st.session_state.current_page == "PROD_HUB":
         st.info("No active coils currently in storage.")
     
     st.write("---")
-
-
     with st.container(border=True):
         st.markdown(" Quality Verification Hub (Tensile Testing)")
         st.caption(" *Input 3 tensile test measurements. Fields start blank. Includes a professional 10 MPa / 5% industrial engineering allowance buffer.*")
@@ -1545,7 +1531,6 @@ elif st.session_state.current_page == "PROD_HUB":
                 st.markdown(" Select Batch")
                 temp_qv_df = prod_df.sort_values(by="id").reset_index(drop=True)
                 temp_qv_df['seq_id'] = temp_qv_df.index + 1
-                
                 qv_options = {}
                 for _, r in temp_qv_df.iterrows():
                     seq_id = int(r["seq_id"])
@@ -1554,22 +1539,18 @@ elif st.session_state.current_page == "PROD_HUB":
                     l_num = str(r.get("lotto_number", ""))
                     l_label = l_num if l_num != "None" and l_num != "" else f"DB-{real_db_id}"
                     qv_options[f"ID #{seq_id} | {g_name} | Lotto: {l_label}"] = real_db_id
-                
                 selected_qv_label = st.selectbox("Choose Coil for Lab Verification", options=list(qv_options.keys()), key="qv_batch_select")
                 selected_qv_id = qv_options[selected_qv_label]
                 
                 qv_row = prod_df[prod_df['id'] == selected_qv_id].iloc[0]
-                
                 st.info(f"""
                 **📋 Certificate & EN10025 Reference Targets:**
                 - **Min Yield ($\sigma_{{yield}}$):** **{qv_row.get('yield_mpa', 0.0)} MPa**
                 - **Min UTS ($\sigma_{{uts}}$):** **{qv_row.get('uts_mpa', 0.0)} MPa**
                 - **Min Elongation:** **{qv_row.get('elongation_pct', 0.0)} %**
                 """)
-
             with qv_col2:
                 st.markdown("#### 📊 Enter 3 Tensile Test Samples")
-                
                 with st.form(key=f"quality_verification_form_{selected_qv_id}"):
                     st.markdown("**1. Yield Stress ($\sigma_{yield}$ - MPa)**")
                     y1, y2, y3 = st.columns(3)
@@ -1590,8 +1571,6 @@ elif st.session_state.current_page == "PROD_HUB":
                     with e3: t3_e = st.number_input("Test 3", value=None, step=0.1, format="%.1f", placeholder="e.g. 24.0", key=f"t3_e_{selected_qv_id}")
                     
                     submit_verification = st.form_submit_button(" Calculate Averages & Evaluate Status", use_container_width=True)
-
-                    
                     if submit_verification:
                         inputs_list = [t1_y, t2_y, t3_y, t1_u, t2_u, t3_u, t1_e, t2_e, t3_e]
                         if any(val is None for val in inputs_list):
@@ -1637,7 +1616,6 @@ elif st.session_state.current_page == "PROD_HUB":
                         
         else:
             st.info("No batches available for quality verification.")
-
     st.write("---")
 
 
@@ -1646,7 +1624,6 @@ elif st.session_state.current_page == "PROD_HUB":
     search_query = st.text_input("🔍 Search by ID, Lotto Number, or Component Code", value="")
     
     dropdown_options_df = pd.DataFrame()
-    
     if not prod_df.empty:
         prod_df['current_weight_kg'] = prod_df['rd_remaining_weight_kg'].fillna(prod_df['coil_weight_kg'])
         prod_df['current_length_mm'] = prod_df['rd_remaining_length_mm'].fillna(prod_df['coil_length_mm'])
@@ -1687,7 +1664,6 @@ elif st.session_state.current_page == "PROD_HUB":
             "lotto_number": "Lotto Father",
             "lotto_figlio": "Component Code"
         })
-        
         if search_query.strip():
             q = search_query.strip().lower()
             mask = (
@@ -1696,9 +1672,7 @@ elif st.session_state.current_page == "PROD_HUB":
                 display_df["Component Code"].astype(str).str.lower().str.contains(q)
             )
             display_df = display_df[mask]
-
         dropdown_options_df = display_df.copy()
-
         cols_order = [
             "ID", "grade", "thickness", "yield_mpa", "uts_mpa", "elongation_pct", 
             "Remaining Weight [TON]", "Remaining Length [mm]", "Lotto Father", "Component Code", "provider", "Status", "real_db_id"
@@ -1710,46 +1684,36 @@ elif st.session_state.current_page == "PROD_HUB":
             if 0.0001 < w_tons <= 20.0:
                 return ['background-color: #ffebee'] * len(row)
             return [''] * len(row)
-
         styled_df = table_display_view.style.apply(highlight_low_stock, axis=1)
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
         st.info("No production batches in database queue.")
-
     st.write("---")
-    
     st.markdown(" Actions & Edits")
     
     with st.container(border=True):
         table_df = dropdown_options_df if not dropdown_options_df.empty else pd.DataFrame()
-        
         if not table_df.empty:
             batch_options = {}
             default_index = 0
             preset_id = st.session_state.get("preset_selected_id", None)
-            
             for seq_idx, (_, row) in enumerate(table_df.iterrows(), 1):
                 db_id = int(row["real_db_id"])
                 grade = str(row.get("grade", ""))
                 father = str(row.get("Lotto Father", ""))
                 son = str(row.get("Component Code", ""))
-                
                 father_str = father if father != "None" and father != "" else ""
-                son_str = son if son != "None" and son != "" else ""
-                
+                son_str = son if son != "None" and son != "" else "" 
                 if father_str and son_str:
                     lotto_str = f"{father_str} → {son_str}"
                 elif son_str:
                     lotto_str = son_str
                 else:
-                    lotto_str = father_str if father_str else "No Lotto"
-                    
+                    lotto_str = father_str if father_str else "No Lotto"     
                 label = f"ID #{seq_idx} | {grade} | Lotto: {lotto_str}"
                 batch_options[label] = db_id
-                
                 if preset_id is not None and db_id == int(preset_id):
                     default_index = seq_idx - 1
-
             selected_label = st.selectbox(
                 "Select Production Batch", 
                 options=list(batch_options.keys()), 
@@ -1757,15 +1721,12 @@ elif st.session_state.current_page == "PROD_HUB":
                 key="actions_batch_select_box"
             )
             selected_prod_id = batch_options[selected_label]
-            
             if preset_id is not None:
                 st.session_state.preset_selected_id = None
-
             matching_rows = prod_df[prod_df['id'] == selected_prod_id]
             if not matching_rows.empty:
                 selected_row = matching_rows.iloc[0]
                 is_already_promoted = (selected_row.get("is_promoted", 0) == 1)
-
                 act_col1, act_col2 = st.columns(2)
                 with act_col1:
                     if is_already_promoted:
@@ -1775,8 +1736,7 @@ elif st.session_state.current_page == "PROD_HUB":
                             promote_cloud_material(selected_prod_id)
                             st.success("Batch promoted to R&D!")
                             st.cache_data.clear()
-                            st.rerun()
-                            
+                            st.rerun()          
                 with act_col2:
                     if "confirm_delete_id" not in st.session_state:
                         st.session_state.confirm_delete_id = None
@@ -1807,28 +1767,22 @@ elif st.session_state.current_page == "PROD_HUB":
                         new_yield = st.number_input("Yield Stress [MPa]", value=float(selected_row.get("yield_mpa", 0.0)), step=5.0)
                         new_uts = st.number_input("Failure Stress [MPa]", value=float(selected_row.get("uts_mpa", 0.0)), step=5.0)
                         new_elong = st.number_input("Elongation [%]", value=float(selected_row.get("elongation_pct", 0.0)), step=0.5)
-
                         db_weight_kg = float(selected_row.get("coil_weight_kg", 0.0) or 0.0)
                         initial_weight_tons = db_weight_kg / 1000.0 if db_weight_kg else 0.0
                         new_weight_tons = st.number_input("Coil Weight [TON]", value=initial_weight_tons, step=1.0, format="%.3f")
                         new_length = st.number_input("Coil Length [mm]", value=float(selected_row.get("coil_length_mm", 0.0)), step=100.0)
-                        
                         val_padre = selected_row.get("lotto_number", "") if pd.notna(selected_row.get("lotto_number")) else ""
                         val_figlio = selected_row.get("lotto_figlio", "") if pd.notna(selected_row.get("lotto_figlio")) else ""
-                        
                         new_lotto_padre = st.text_input("Lotto Father", value=str(val_padre))
                         new_component_code = st.text_input("Component Code", value=str(val_figlio))
                         new_provider = st.text_input("Provider", value=str(selected_row.get("provider", "")))
-                        
                         new_certificate = st.file_uploader(
                             "Upload Material Certificate (PDF / Image)", 
                             type=["pdf", "png", "jpg", "jpeg"],
                             key=f"cert_file_{selected_prod_id}"
-                        )
-                        
+                        )        
                         if st.form_submit_button("💾 Save Changes", use_container_width=True):
                             cert_file_obj = new_certificate if 'new_certificate' in locals() else None            
-
                             update_cloud_material(
                                 selected_prod_id, 
                                 grade=new_grade, thickness=new_thickness, 
@@ -2012,7 +1966,6 @@ elif st.session_state.current_page == "PROD_HUB":
 
 #########################################################################################################################################################
 ##############################################  AREA CRUSH PAGE #########################################################################################
-
 elif st.session_state.current_page == "area_crush":
     if st.button("← Return to Central Portal"):
         st.session_state.current_page = "HOME"
@@ -2048,25 +2001,20 @@ elif st.session_state.current_page == "area_crush":
     st.markdown(f" Area Crush — {st.session_state.active_family} Family")
 
     crush_df = fetch_cloud_materials(family=st.session_state.active_family, hub_section="CRUSH")
-
     allowed_cols = ['id', 'family', 'hub_section', 'grade', 'lotto_number', 'codice', 'description', 'quantity', 'rd_notes']
     existing_cols = [c for c in allowed_cols if c in crush_df.columns]
     crush_df = crush_df[existing_cols]
 
     col1, col2 = st.columns([2, 2])
     with col1:
-        search_codice = st.text_input("🔍 Search by Code", placeholder="Enter codice to filter...")
-    
+        search_codice = st.text_input("🔍 Search by Code", placeholder="Enter codice to filter...")   
     if search_codice and not crush_df.empty:
         crush_df = crush_df[crush_df['codice'].astype(str).str.contains(search_codice, case=False, na=False)]
-
     st.markdown("#### 📋 Crush Batch Queue & Quantities")
     st.info(" Update quantities and notes directly in the table below, then click 'Save Changes'.")
-    
     if not crush_df.empty:
         crush_df = crush_df.reset_index(drop=True)
         crush_df.insert(0, "No.", (crush_df.index + 1).astype(str))
-
         edited_crush_df = st.data_editor(
             crush_df,
             column_order=["No.", "grade", "lotto_number", "codice", "description", "quantity", "rd_notes"],
@@ -2086,11 +2034,13 @@ elif st.session_state.current_page == "area_crush":
             num_rows="dynamic",
             key="crush_data_editor"
         )
-        
         if st.button("💾 Save Changes to Database", type="primary"):
             with conn.session as s:
+                current_ui_ids = []
                 for _, row in edited_crush_df.iterrows():
-                    if pd.notna(row.get('id')):
+                    row_id = row.get('id')
+                    if pd.notna(row_id):
+                        current_ui_ids.append(int(row_id))
                         s.execute(
                             text("""
                                 UPDATE materials 
@@ -2109,22 +2059,44 @@ elif st.session_state.current_page == "area_crush":
                                 "description": row.get('description'),
                                 "quantity": row.get('quantity'),
                                 "rd_notes": row.get('rd_notes'),
-                                "id": row['id']
+                                "id": row_id
                             }
                         )
+                    else:
+                        s.execute(
+                            text("""
+                                INSERT INTO materials (family, hub_section, grade, lotto_number, codice, description, quantity, rd_notes)
+                                VALUES (:family, :hub_section, :grade, :lotto_number, :codice, :description, :quantity, :rd_notes)
+                            """),
+                            {
+                                "family": st.session_state.active_family,
+                                "hub_section": "CRUSH",
+                                "grade": row.get('grade'),
+                                "lotto_number": row.get('lotto_number'),
+                                "codice": row.get('codice'),
+                                "description": row.get('description'),
+                                "quantity": row.get('quantity'),
+                                "rd_notes": row.get('rd_notes')
+                            }
+                        )
+                original_ids = crush_df['id'].dropna().astype(int).tolist()
+                deleted_ids = [rid for rid in original_ids if rid not in current_ui_ids]
+                for del_id in deleted_ids:
+                    s.execute(
+                        text("DELETE FROM materials WHERE id = :id"),
+                        {"id": del_id}
+                    )
                 s.commit()
-            st.success("Area Crush data updated successfully!")
+            st.success("Area Crush data updated and deletions synchronized successfully!")
             st.rerun()
     else:
         st.warning("No crush records found for this family.")
-
     st.write("---")
 
     st.markdown(" 📥 Manual Entry or .txt Batch Import")
     entry_mode = st.radio("Entry Method", ["Manual Form", "Upload .txt File"], horizontal=True, key="crush_mode")
-    
     if entry_mode == "Manual Form":
-        with st.form("crush_manual_form"):
+        with st.form("crush_manual_form", clear_on_submit=True):
             c1, c2 = st.columns(2)
             with c1:
                 g_in = st.text_input("Grade", key="crush_g")
@@ -2134,8 +2106,7 @@ elif st.session_state.current_page == "area_crush":
                 lp_in = st.text_input("Lotto Padre", key="crush_lp")
                 desc_in = st.text_input("Description", key="crush_desc")
                 
-            note_in = st.text_area("Note", key="crush_note")
-                            
+            note_in = st.text_area("Note", key="crush_note")                        
             if st.form_submit_button("Add Crush Record"):
                 with conn.session as s:
                     s.execute(
@@ -2155,17 +2126,18 @@ elif st.session_state.current_page == "area_crush":
                         }
                     )
                     s.commit()
-                st.session_state["crush_g"] = ""
-                st.session_state["crush_cod"] = ""
-                st.session_state["crush_lp"] = ""
-                st.session_state["crush_desc"] = ""
-                st.session_state["crush_qty"] = ""
-                st.session_state["crush_note"] = ""
-                st.success("New crush record added!")
+                st.success("New crush part record added")
                 st.rerun()
                 
     elif entry_mode == "Upload .txt File":
-        txt_file = st.file_uploader("Upload Crush .txt File", type=["txt"], key="crush_txt")
+        if "uploader_reset_counter" not in st.session_state:
+            st.session_state["uploader_reset_counter"] = 0
+        txt_file = st.file_uploader(
+            "Upload Crush .txt File", 
+            type=["txt"], 
+            key=f"crush_txt_{st.session_state['uploader_reset_counter']}"
+        )
+        
         if txt_file is not None:
             content = txt_file.getvalue().decode("utf-8")
             st.text_area("File Content Preview", content, height=120)
@@ -2173,8 +2145,8 @@ elif st.session_state.current_page == "area_crush":
                 with conn.session as s:
                     for line in content.splitlines():
                         if line.strip():
-                            parts = line.split(";")
-                            if len(parts) >= 6:
+                            parts = line.split(",")
+                            if len(parts) >= 5:
                                 s.execute(
                                     text("""
                                         INSERT INTO materials (family, hub_section, grade, lotto_number,  codice, description, quantity, rd_notes)
@@ -2185,12 +2157,13 @@ elif st.session_state.current_page == "area_crush":
                                         "hub_section": "CRUSH",
                                         "grade": parts[0].strip(),
                                         "lotto_number": parts[1].strip(),
-                                        "codice": parts[3].strip(),
-                                        "description": parts[4].strip(),
-                                        "quantity": parts[5].strip(),
-                                        "rd_notes": parts[6].strip() if len(parts) > 6 else ""
+                                        "codice": parts[2].strip(),
+                                        "description": parts[3].strip(),
+                                        "quantity": parts[4].strip(),
+                                        "rd_notes": parts[5].strip() if len(parts) > 5 else ""
                                     }
                                 )
-                    s.commit()
+                    s.commit()      
+                st.session_state["uploader_reset_counter"] += 1
                 st.success("TXT file successfully imported into Area Crush!")
                 st.rerun()
