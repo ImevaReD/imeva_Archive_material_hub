@@ -812,19 +812,17 @@ elif st.session_state.current_page == "RD_DECK":
         rd_storage_df = sq_rd_df.sort_values(by="id").reset_index(drop=True).copy()
         rd_storage_df['seq_id'] = rd_storage_df.index + 1
         
-        # Filter out parent lots that have been split into children (Identical to PROD_HUB)
-        split_fathers = rd_storage_df[
-            rd_storage_df['lotto_figlio'].notna() & 
-            (rd_storage_df['lotto_figlio'].astype(str).str.strip() != '') &
-            (rd_storage_df['lotto_figlio'].astype(str).str.strip() != 'None')
-        ]['lotto_number'].dropna().astype(str).unique()
-        
-        rd_storage_df = rd_storage_df[
-            ~(
-                rd_storage_df['lotto_number'].astype(str).isin(split_fathers) & 
-                (rd_storage_df['lotto_figlio'].isna() | (rd_storage_df['lotto_figlio'].astype(str).str.strip() == '') | (rd_storage_df['lotto_figlio'].astype(str).str.strip() == 'None'))
-            )
-        ]
+        # [CLAUDE FIX A1b] -------------------------------------------------------------------------------------
+        # Prima: venivano nascosti TUTTI i coil senza Component Code il cui lotto_number coincideva con il lotto
+        # di un qualsiasi coil con Component Code. Coil diversi dello stesso lotto (stessa colata) sparivano
+        # dall'R&D Deck -> causa del numero ridotto di coil "Standby".
+        # Ora: si nascondono solo i padri realmente splittati, riconosciuti tramite parent_id dei figli.
+        # (I padri splittati hanno comunque peso residuo 0 e sono già esclusi dal filtro peso qui sopra.)
+        split_parent_ids = set(
+            pd.to_numeric(rd_storage_df['parent_id'], errors='coerce').dropna().astype(int).tolist()
+        )
+        rd_storage_df = rd_storage_df[~rd_storage_df['id'].astype(int).isin(split_parent_ids)]
+        # [END CLAUDE FIX A1b] ---------------------------------------------------------------------------------
         
         for _, row in rd_storage_df.iterrows():
             mat_id = int(row['id'])
@@ -866,6 +864,8 @@ elif st.session_state.current_page == "RD_DECK":
 
             cert_sy = float(row['yield_mpa'] or 0.0)
             cert_sf = float(row['uts_mpa'] or 0.0)
+            # [CLAUDE FIX A1b] Allungamento da certificato: prima non veniva letto e il filtro lo vedeva sempre = 0.
+            cert_el = float(row['elongation_pct']) if pd.notna(row.get('elongation_pct')) else 0.0
             
             c_weight = float(row.get('coil_weight_kg') or 0.0)
             c_length = float(row.get('coil_length_mm') or 0.0)
@@ -902,6 +902,7 @@ elif st.session_state.current_page == "RD_DECK":
                 "thickness": thick_val,
                 "cert_yield_MPa": cert_sy,
                 "cert_uts_MPa": cert_sf,
+                "cert_elong_pct": cert_el,          # [CLAUDE FIX A1b] allungamento da certificato
                 "lotto": lotto_str,
                 "coil_weight_kg": c_weight,
                 "coil_length_mm": c_length,
@@ -967,6 +968,13 @@ elif st.session_state.current_page == "RD_DECK":
         )
 
     
+    # [CLAUDE FIX A1b] Gli slider meccanici filtrano SOLO se l'utente li sposta dai valori di default.
+    # Prima i coil con valori di certificato mancanti (0) venivano esclusi in silenzio (min slider = 100 MPa).
+    yield_filter_on = (min_yield, max_yield) != (100.0, 1000.0)
+    uts_filter_on = (min_uts, max_uts) != (100.0, 1200.0)
+    elong_filter_on = (min_elong, max_elong) != (0.0, 50.0)
+    excluded_log = []   # [CLAUDE FIX A1b] (nome coil, motivo esclusione) -> mostrato nell'expander diagnostico
+
     filtered_materials = {}
     for mat_id, metadata in combined_materials.items():
         grade_match = (filter_grade == "All" or metadata.get("grade") == filter_grade)
@@ -1004,7 +1012,7 @@ elif st.session_state.current_page == "RD_DECK":
         if cert_status_filter == "Supplier Cert.":
             active_yield = metadata.get("cert_yield_MPa", 0)
             active_uts = metadata.get("cert_uts_MPa", 0)
-            active_elong = metadata.get("elongation_pct", 0)
+            active_elong = metadata.get("cert_elong_pct", 0)      # [CLAUDE FIX A1b] prima: "elongation_pct" (chiave inesistente -> 0)
             cert_match = True
         elif cert_status_filter == "Laboratory":
             session_data = st.session_state.experimental_curves.get(mat_id, {})
@@ -1018,21 +1026,45 @@ elif st.session_state.current_page == "RD_DECK":
         else: 
             active_yield = metadata.get("sigy_MPa", metadata.get("cert_yield_MPa", 0))
             active_uts = metadata.get("uts_MPa", metadata.get("cert_uts_MPa", 0))
-            active_elong = metadata.get("elongation_pct", 0)
+            active_elong = metadata.get("cert_elong_pct", 0)      # [CLAUDE FIX A1b] prima: "elongation_pct" (chiave inesistente -> 0)
             cert_match = True
 
-        yield_match = min_yield <= active_yield <= max_yield
-        uts_match = min_uts <= active_uts <= max_uts
-        elong_match = min_elong <= active_elong <= max_elong
+        # [CLAUDE FIX A1b] range applicati solo se attivati dall'utente (vedi sopra)
+        yield_match = (not yield_filter_on) or (min_yield <= active_yield <= max_yield)
+        uts_match = (not uts_filter_on) or (min_uts <= active_uts <= max_uts)
+        elong_match = (not elong_filter_on) or (min_elong <= active_elong <= max_elong)
 
         if grade_match and status_match and thickness_match and yield_match and uts_match and elong_match and cert_match:
             filtered_materials[mat_id] = metadata
+        else:
+            # [CLAUDE FIX A1b] registra il primo motivo di esclusione (diagnostica per l'utente)
+            if is_non_compliant:
+                reason = "Non conforme (prova di laboratorio)"
+            elif not status_match:
+                reason = "Filtro stato (" + ("in R&D" if in_rd else "in produzione") + f", stato: {raw_st or 'vuoto'})"
+            elif not grade_match:
+                reason = "Filtro grade"
+            elif not thickness_match:
+                reason = "Filtro spessore"
+            elif not cert_match:
+                reason = "Nessun dato di laboratorio"
+            else:
+                reason = "Filtro proprietà meccaniche (yield / UTS / allungamento)"
+            excluded_log.append((metadata.get("display_name", str(mat_id)), reason))
 
     main_col, chart_col = st.columns([1, 1])
 
     with main_col:
         st.subheader("Available Inventory & Promoted Batches")
         st.caption("Format: `[Cert: YS, UTS | Lab: YS, UTS]`")
+        # [CLAUDE FIX A1b] Riepilogo: quanti coil sono mostrati e perché gli altri sono esclusi
+        st.caption(f"Coil mostrati: **{len(filtered_materials)}** su **{len(combined_materials)}** disponibili (peso residuo > 0).")
+        if excluded_log:
+            with st.expander(f"🔎 Coil esclusi dai filtri ({len(excluded_log)})", expanded=False):
+                st.dataframe(
+                    pd.DataFrame(excluded_log, columns=["Coil", "Motivo esclusione"]),
+                    use_container_width=True, hide_index=True
+                )
         if not combined_materials:
             st.info("No materials found in the database yet.")
         elif not filtered_materials:
@@ -1045,8 +1077,15 @@ elif st.session_state.current_page == "RD_DECK":
                 rem_len = info["rd_remaining_length_mm"]
                 rem_weight = info["rd_remaining_weight_kg"]
                 inv_badge = "🟢 Available" if rem_len > 10.0 else "🔴 Low Stock"
-                status_badge = "✅ EN Compliant" if is_compliant else "❌ Non-Compliant"
-                st.markdown(f"**Status:** {status_badge} | {inv_badge} | **Stock:** {rem_weight/1000.0:.1f} TON / {rem_len:.1f} mm")
+                # [CLAUDE FIX A1b] Prima il badge "❌ Non-Compliant" indicava SOLO che lo yield del certificato è sotto
+                # il minimo EN 10025 (get_en10025_limits) e veniva confuso con lo stato "Non conforme" di laboratorio.
+                # Ora i due concetti sono separati: "Quality" = esito prove lab, "Cert vs EN" = controllo certificato.
+                status_badge = "✅ Cert ≥ EN min" if is_compliant else f"⚠️ Cert yield < EN min ({limits['min_yield']} MPa)"
+                location_badge = "🔬 In R&D" if info.get("in_rd") else "🏭 In Produzione"
+                st.markdown(
+                    f"**Quality:** {info.get('quality_status')} | {location_badge} | **Cert vs EN:** {status_badge} | "
+                    f"{inv_badge} | **Stock:** {rem_weight/1000.0:.1f} TON / {rem_len:.1f} mm"
+                )
                 
                 card_col1, card_col2 = st.columns([3, 1])
                 with card_col1:
