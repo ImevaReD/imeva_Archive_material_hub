@@ -283,6 +283,29 @@ def fetch_cloud_materials(hub_section="PROD", family='METALS'):
             ORDER BY id DESC;
         """
         return conn.query(query, params={"fam": family}, ttl=0)
+
+    # [CLAUDE FIX A1] -------------------------------------------------------------------------------------------
+    # Nuova sorgente dati dedicata alla pagina R&D Deck.
+    # Prima l'R&D Deck usava la query PROD (default) e la query "RD" qui sopra non veniva mai chiamata.
+    # Requisito: nell'R&D Deck devono essere visibili sia i coil ancora in produzione (Standby / Verified)
+    # sia quelli già passati in R&D (hub_section = 'RD' oppure is_promoted = 1).
+    # L'esclusione dei NON CONFORMI e la suddivisione per stato vengono fatte dal filtro "Filter by Status".
+    # L'area CRUSH resta esclusa.
+    elif hub_section == "RD_DECK":
+        query = """
+            SELECT 
+                id, parent_id, family, hub_section, grade, thickness, 
+                yield_mpa, uts_mpa, elongation_pct, coil_weight_kg, coil_length_mm, 
+                rd_remaining_weight_kg, rd_remaining_length_mm, rd_notes, 
+                lotto_number, lotto_figlio, provider, 
+                certificate_url AS datasheet, 
+                is_promoted, codice, description, quantity, quality_status
+            FROM materials 
+            WHERE (hub_section IN ('PROD', 'RD') OR hub_section IS NULL OR is_promoted = 1) AND family = :fam 
+            ORDER BY id DESC;
+        """
+        return conn.query(query, params={"fam": family}, ttl=0)
+    # [END CLAUDE FIX A1] ---------------------------------------------------------------------------------------
         
     elif hub_section == "CRUSH":
         query = """
@@ -774,7 +797,9 @@ elif st.session_state.current_page == "RD_DECK":
     st.title(f"{family_name} R&D Laboratory Deck")
     st.write("---")
     
-    sq_rd_df = fetch_cloud_materials(family=st.session_state.active_family)
+    # [CLAUDE FIX A1] Prima: fetch_cloud_materials(family=...) -> caricava la query PROD (default hub_section="PROD").
+    # Ora: sorgente dedicata "RD_DECK" = coil in produzione + coil in R&D (vedi fetch_cloud_materials).
+    sq_rd_df = fetch_cloud_materials(hub_section="RD_DECK", family=st.session_state.active_family)
     
     if not sq_rd_df.empty:
         sq_rd_df['calc_weight_kg'] = sq_rd_df['rd_remaining_weight_kg'].fillna(sq_rd_df['coil_weight_kg'])
@@ -849,6 +874,10 @@ elif st.session_state.current_page == "RD_DECK":
             rd_notes_val = str(row.get('rd_notes') or "")
             
             is_promoted = (row.get('is_promoted', 0) == 1)
+            # [CLAUDE FIX A1] Posizione del coil: è "in R&D" se promosso oppure se hub_section = 'RD'.
+            # Tutti gli altri sono "in produzione". Serve al filtro "Filter by Status".
+            hub_sec_val = str(row.get('hub_section') or "PROD").strip().upper()
+            in_rd = is_promoted or hub_sec_val == "RD"
             db_status = str(row.get('quality_status') or "").strip()
             
             if not db_status or db_status == "None":
@@ -881,6 +910,7 @@ elif st.session_state.current_page == "RD_DECK":
                 "rd_notes": rd_notes_val,
                 "quality_status": q_status,
                 "is_promoted": is_promoted,
+                "in_rd": in_rd,                     # [CLAUDE FIX A1] True = coil in R&D, False = coil in produzione
                 "datasheet": row['datasheet'] if pd.notna(row['datasheet']) else None
             }
 
@@ -942,18 +972,31 @@ elif st.session_state.current_page == "RD_DECK":
         grade_match = (filter_grade == "All" or metadata.get("grade") == filter_grade)
         
         raw_st = str(metadata.get("quality_status", ""))
-        is_prom = metadata.get("is_promoted", False)
-        
-        if filter_status == "All":
+        # [CLAUDE FIX A1] ---------------------------------------------------------------------------------------
+        # Nuova logica "Filter by Status":
+        #   All         -> tutti i coil (produzione + R&D) TRANNE i non conformi
+        #   🟢 Standby  -> coil IN PRODUZIONE con stato Standby (o stato non ancora assegnato)
+        #   Verified ✅ -> coil IN PRODUZIONE verificati in laboratorio
+        #   🔬 R&D      -> coil IN R&D (promossi / splittati)
+        # I non conformi (stato contenente "Non-Compliant", "Rejected" o "❌") non sono mai mostrati in R&D Deck.
+        in_rd = metadata.get("in_rd", False)
+        is_non_compliant = ("Non-Compliant" in raw_st) or ("Rejected" in raw_st) or ("❌" in raw_st)
+        is_verified = ("Verified" in raw_st) and not is_non_compliant
+        is_standby = ("Standby" in raw_st) or (raw_st.strip() in ["", "None"])
+
+        if is_non_compliant:
+            status_match = False
+        elif filter_status == "All":
             status_match = True
         elif filter_status == "🟢 Standby":
-            status_match = ("Standby" in raw_st) or (not is_prom)
-        elif filter_status == "🔬 R&D":
-            status_match = ("R&D" in raw_st) or is_prom
+            status_match = (not in_rd) and is_standby
         elif filter_status == "Verified ✅":
-            status_match = ("Verified" in raw_st) or ("✅" in raw_st)
+            status_match = (not in_rd) and is_verified
+        elif filter_status == "🔬 R&D":
+            status_match = in_rd
         else:
             status_match = True
+        # [END CLAUDE FIX A1] -----------------------------------------------------------------------------------
 
         thick_val = metadata.get("thickness", 0)
         thickness_match = True if not enable_thick_filter else (abs(thick_val - selected_thickness) <= 0.05)
