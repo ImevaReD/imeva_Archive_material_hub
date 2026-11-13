@@ -184,9 +184,21 @@ def open_coil_management_dialog(grade, thick, length, group_rows):
 
 st.set_page_config(page_title="IMEVA Materials Hub", layout="wide")
 
+# [CLAUDE FIX C3] ------------------------------------------------------------------------------------------------
+# SUPABASE_URL deve essere l'indirizzo BASE del progetto: https://<progetto>.supabase.co
+# Se nel secrets.toml viene incollato l'URL della Data API (".../rest/v1/") le chiamate allo Storage finiscono
+# su un indirizzo sbagliato (.../rest/v1/storage/v1/...). Qui l'URL viene normalizzato togliendo il suffisso.
+def _supabase_base_url():
+    raw = str(st.secrets["connections"]["supabase"]["SUPABASE_URL"]).strip().rstrip("/")
+    for suffix in ("/rest/v1", "/storage/v1", "/auth/v1"):
+        if raw.endswith(suffix):
+            raw = raw[: -len(suffix)]
+    return raw
+# [END CLAUDE FIX C3] --------------------------------------------------------------------------------------------
+
 @st.cache_resource
 def init_supabase_client():
-    url = st.secrets["connections"]["supabase"]["SUPABASE_URL"]
+    url = _supabase_base_url()   # [CLAUDE FIX C3] prima: SUPABASE_URL usato così com'era
     key = st.secrets["connections"]["supabase"]["SUPABASE_KEY"]
     return create_client(url, key)
 
@@ -220,7 +232,7 @@ STORAGE_KEY_MISSING_MSG = (
 @st.cache_resource
 def init_storage_client():
     sb_conf = st.secrets["connections"]["supabase"]
-    url = sb_conf["SUPABASE_URL"].rstrip("/")
+    url = _supabase_base_url()   # [CLAUDE FIX C3] URL base normalizzato
     key = str(sb_conf.get("SUPABASE_STORAGE_KEY") or sb_conf.get("SUPABASE_KEY") or "").strip()
     if not key:
         return None
