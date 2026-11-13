@@ -1513,23 +1513,39 @@ elif st.session_state.current_page == "PROD_HUB":
         temp_storage_df = prod_df.sort_values(by="id").reset_index(drop=True).copy()
         temp_storage_df['seq_id'] = temp_storage_df.index + 1
         
-        # Filter out parent lots that have been split into children
-        split_fathers = temp_storage_df[
-            temp_storage_df['lotto_figlio'].notna() & 
-            (temp_storage_df['lotto_figlio'].astype(str).str.strip() != '') &
-            (temp_storage_df['lotto_figlio'].astype(str).str.strip() != 'None')
-        ]['lotto_number'].dropna().astype(str).unique()
-        
-        temp_storage_df = temp_storage_df[~temp_storage_df['lotto_number'].astype(str).isin(split_fathers)]
+        # [CLAUDE FIX B4] -------------------------------------------------------------------------------------
+        # Prima: venivano esclusi dal Warehouse TUTTI i coil il cui lotto_number coincideva con il lotto di un
+        # qualsiasi coil con Component Code (figli compresi e coil diversi della stessa colata).
+        # Ora le esclusioni sono esplicite e basate su id / posizione, non sul numero di lotto:
+        #   1) padri realmente splittati -> riconosciuti tramite parent_id dei figli
+        #      (hanno già peso residuo 0 e sono esclusi dal filtro peso: questo è un controllo di sicurezza)
+        #   2) coil già passati in R&D (is_promoted = 1 oppure hub_section = 'RD') -> il Warehouse mostra
+        #      solo i coil fisicamente in produzione, coerente con il filtro "Filter by Status" dell'R&D Deck.
+        #      Restano comunque visibili nella tabella "Production Batch Queue" sottostante.
+        split_parent_ids = set(
+            pd.to_numeric(temp_storage_df['parent_id'], errors='coerce').dropna().astype(int).tolist()
+        )
+        is_split_parent = temp_storage_df['id'].astype(int).isin(split_parent_ids)
+
+        is_in_rd = (
+            (pd.to_numeric(temp_storage_df['is_promoted'], errors='coerce').fillna(0) == 1) |
+            (temp_storage_df['hub_section'].fillna('PROD').astype(str).str.strip().str.upper() == 'RD')
+        )
+
+        temp_storage_df = temp_storage_df[~is_split_parent & ~is_in_rd]
+        # [END CLAUDE FIX B4] ---------------------------------------------------------------------------------
         
         temp_storage_df['active_lot'] = temp_storage_df['lotto_number'].apply(
             lambda x: str(x).strip() if pd.notna(x) and str(x).strip() not in ['', 'None', 'nan'] else "Unknown Lot"
         )
         
-        temp_storage_df['lot_detail'] = temp_storage_df.apply(
-            lambda row: f"<b>ID #{row['seq_id']}</b> : {row['active_lot']} <i>({row['calc_weight_kg']/1000.0:.1f} t, {row.get('calc_length_mm', 0):.0f} mm)</i>",
-            axis=1
-        )
+        # [CLAUDE FIX B4] Costruzione con list comprehension invece di DataFrame.apply(axis=1):
+        # con il nuovo filtro il Warehouse può restare vuoto (es. tutti i coil in R&D) e apply() su un
+        # DataFrame vuoto restituisce un DataFrame, che non può essere assegnato a una colonna (errore).
+        temp_storage_df['lot_detail'] = [
+            f"<b>ID #{row['seq_id']}</b> : {row['active_lot']} <i>({row['calc_weight_kg']/1000.0:.1f} t, {row.get('calc_length_mm', 0):.0f} mm)</i>"
+            for _, row in temp_storage_df.iterrows()
+        ]
         
         grouped_storage = temp_storage_df.groupby(['grade', 'thickness', 'calc_length_mm']).agg(
             coil_count=('active_lot', 'count'),
