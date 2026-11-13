@@ -50,7 +50,7 @@ if not check_password():
 
 @st.dialog(" Manage & Split Coil Batch", width="large")
 def open_coil_management_dialog(grade, thick, length, group_rows):
-    st.write(f"### 📦 Selected Group: **{grade} | {thick} mm | {length:.0f} mm**")
+    st.write(f"### 📦 Selected Group: **{grade} | {thick} mm | W {length:.0f} mm**")   # [CLAUDE FIX W1] W = larghezza
     st.markdown("Select a specific coil/lotto from this group to manage or split:")
     
     sorted_full_df = prod_df.sort_values(by="id").reset_index(drop=True)
@@ -89,14 +89,14 @@ def open_coil_management_dialog(grade, thick, length, group_rows):
         
         base_lotto = selected_row.get('lotto_figlio') if pd.notna(selected_row.get('lotto_figlio')) else selected_row.get('lotto_number', '')
         
-        st.info(f"Available to split: **{current_w_tons:.3f} TON** / **{current_l:.2f} mm**")
+        st.info(f"Available to split: **{current_w_tons:.3f} TON** / Width **{current_l:.2f} mm**")   # [CLAUDE FIX W1]
         
         num_children = st.number_input("Number of Components", min_value=2, max_value=10, value=2, step=1, key=f"modal_num_child_{selected_db_id}")
         
         with st.form(key=f"modal_split_form_{selected_db_id}"):
             children_inputs = []
             letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            weight_per_mm_kg = current_w_kg / current_l if current_l > 0 else 0.0
+            weight_per_mm_kg = current_w_kg / current_l if current_l > 0 else 0.0   # [CLAUDE FIX W1] peso per mm di LARGHEZZA
             
             for i in range(int(num_children)):
                 st.markdown(f"**Component {i+1} ({letters[i]})**")
@@ -104,7 +104,7 @@ def open_coil_management_dialog(grade, thick, length, group_rows):
                 with cc1:
                     c_lotto = st.text_input(f"Component Code {i+1}", value=f"{base_lotto}-{letters[i]}", key=f"modal_split_lotto_{selected_db_id}_{i}")
                 with cc2:
-                    c_length = st.number_input(f"Length {i+1} [mm]", min_value=0.0, max_value=current_l, value=0.0, key=f"modal_split_l_{selected_db_id}_{i}")
+                    c_length = st.number_input(f"Width {i+1} [mm]", min_value=0.0, max_value=current_l, value=0.0, key=f"modal_split_l_{selected_db_id}_{i}")
                 with cc3:
                     c_weight_kg = c_length * weight_per_mm_kg
                     c_weight_tons = c_weight_kg / 1000.0
@@ -117,7 +117,7 @@ def open_coil_management_dialog(grade, thick, length, group_rows):
             if st.form_submit_button("Confirm Split & Close Parent", use_container_width=True):
                 total_l = sum(c["length"] for c in children_inputs)
                 if total_l > current_l:
-                    st.error("Sum of child lengths exceeds parent remaining length!")
+                    st.error("Sum of child widths exceeds parent coil width!")   # [CLAUDE FIX W1]
                 else:
                     split_cloud_material(selected_db_id, children_inputs, auto_promote_rd=True)
                     st.success("Coil successfully split and pushed to R&D!")
@@ -136,7 +136,8 @@ def open_coil_management_dialog(grade, thick, length, group_rows):
             db_weight_kg = float(selected_row.get("coil_weight_kg", 0.0) or 0.0)
             initial_weight_tons = db_weight_kg / 1000.0 if db_weight_kg else 0.0
             new_weight_tons = st.number_input("Coil Weight [TON]", value=initial_weight_tons, step=1.0, format="%.3f")
-            new_length = st.number_input("Coil Length [mm]", value=float(selected_row.get("coil_length_mm", 0.0)), step=100.0)
+            # [CLAUDE FIX W1] coil_length_mm = LARGHEZZA coil: prima "Coil Length [mm]"
+            new_length = st.number_input("Coil Width [mm]", value=float(selected_row.get("coil_length_mm", 0.0)), step=10.0)
             
             val_padre = selected_row.get("lotto_number", "") if pd.notna(selected_row.get("lotto_number")) else ""
             val_figlio = selected_row.get("lotto_figlio", "") if pd.notna(selected_row.get("lotto_figlio")) else ""
@@ -266,6 +267,12 @@ if "reports_loaded_from_cloud" not in st.session_state:
         pass
 
 
+# [CLAUDE FIX W1] -------------------------------------------------------------------------------------------------
+# NOTA MODELLO DATI: le colonne DB "coil_length_mm" e "rd_remaining_length_mm" contengono la LARGHEZZA del coil [mm]
+# (non la lunghezza). I nomi delle colonne NON sono stati cambiati per non richiedere una migrazione del database
+# Supabase e non perdere i dati esistenti: sono cambiate solo le etichette dell'interfaccia e i commenti.
+# Lo split (slitting) divide il coil in coil di larghezza minore: peso figlio = larghezza figlio x (peso / larghezza padre).
+# [END CLAUDE FIX W1] ---------------------------------------------------------------------------------------------
 def fetch_cloud_materials(hub_section="PROD", family='METALS'):
     """Fetch entries filtered by hub section, including Crush, RD, and Quality Status fields."""
     
@@ -1084,7 +1091,7 @@ elif st.session_state.current_page == "RD_DECK":
                 location_badge = "🔬 In R&D" if info.get("in_rd") else "🏭 In Produzione"
                 st.markdown(
                     f"**Quality:** {info.get('quality_status')} | {location_badge} | **Cert vs EN:** {status_badge} | "
-                    f"{inv_badge} | **Stock:** {rem_weight/1000.0:.1f} TON / {rem_len:.1f} mm"
+                    f"{inv_badge} | **Stock:** {rem_weight/1000.0:.1f} TON / W {rem_len:.1f} mm"   # [CLAUDE FIX W1] W = larghezza
                 )
                 
                 card_col1, card_col2 = st.columns([3, 1])
@@ -1204,17 +1211,17 @@ elif st.session_state.current_page == "RD_DECK":
             rd_notes_val = mat_info.get("rd_notes")
 
             st.markdown(f"""
-            **Remaining Stock:** **{curr_rem_w/ 1000.0:.3f} TON** / **{curr_rem_l:.3f} mm**  
-            *(Original Baseline: {init_w / 1000.0:.3f} TON / {init_l:.3f} mm)*  
+            **Remaining Stock:** **{curr_rem_w/ 1000.0:.3f} TON** / Width **{curr_rem_l:.1f} mm**  
+            *(Original Baseline: {init_w / 1000.0:.3f} TON / Width {init_l:.1f} mm)*  
             📝**Notes / Log History:** {rd_notes_val if rd_notes_val else "No cuts logged yet."}
             """)
 
             with st.form(key=f"rd_tracker_form_{mat_id}"):
-                col_w1, col_w2 = st.columns(2)
-                with col_w1:
-                    weight_consumed_ton = st.number_input("Weight Used [TON]", value=0.0, step=0.1, format="%.3f")
-                with col_w2:
-                    length_consumed = st.number_input("Length Used [mm]", value=0.0, step=100.0)
+                # [CLAUDE FIX W1] Rimosso il campo "Length Used [mm]": il campo dimensionale del coil è la LARGHEZZA,
+                # che non diminuisce quando si consuma materiale (si consuma lunghezza di nastro = peso).
+                # Si scala quindi solo il peso; la larghezza resta invariata (length_consumed = 0).
+                weight_consumed_ton = st.number_input("Weight Used [TON]", value=0.0, step=0.1, format="%.3f")
+                length_consumed = 0.0
                 
                 usage_notes = st.text_input("Usage Purpose / Notes", value="")
                 
@@ -1543,10 +1550,11 @@ elif st.session_state.current_page == "PROD_HUB":
         # con il nuovo filtro il Warehouse può restare vuoto (es. tutti i coil in R&D) e apply() su un
         # DataFrame vuoto restituisce un DataFrame, che non può essere assegnato a una colonna (errore).
         temp_storage_df['lot_detail'] = [
-            f"<b>ID #{row['seq_id']}</b> : {row['active_lot']} <i>({row['calc_weight_kg']/1000.0:.1f} t, {row.get('calc_length_mm', 0):.0f} mm)</i>"
+            f"<b>ID #{row['seq_id']}</b> : {row['active_lot']} <i>({row['calc_weight_kg']/1000.0:.1f} t, W {row.get('calc_length_mm', 0):.0f} mm)</i>"   # [CLAUDE FIX W1] W = larghezza
             for _, row in temp_storage_df.iterrows()
         ]
         
+        # [CLAUDE FIX W1] raggruppamento card: grade + spessore + LARGHEZZA (calc_length_mm = larghezza)
         grouped_storage = temp_storage_df.groupby(['grade', 'thickness', 'calc_length_mm']).agg(
             coil_count=('active_lot', 'count'),
             total_weight=('calc_weight_kg', 'sum'),
@@ -1591,7 +1599,7 @@ elif st.session_state.current_page == "PROD_HUB":
                     
                     card_html = f"""<div style="border: 2px solid {border_color}; background-color: {bg_color}; padding: 14px; border-radius: 8px; text-align: left; box-shadow: 0 2px 4px rgba(0,0,0,0.06); width: 100%; box-sizing: border-box; margin-bottom: 6px;">
 <div style="font-weight: bold; color: #111; font-size: 16px; margin-bottom: 8px;">
-{grade} | {thick} mm | {length:.0f} mm
+{grade} | {thick} mm | W {length:.0f} mm
 </div>
 <div style="margin-bottom: 8px; display: flex; justify-content: flex-start; align-items: center; flex-wrap: wrap;">
 {coil_icons_html}
@@ -1758,7 +1766,7 @@ elif st.session_state.current_page == "PROD_HUB":
         
         display_df = display_df.rename(columns={
             "current_weight_tons": "Remaining Weight [TON]",
-            "current_length_mm": "Remaining Length [mm]",
+            "current_length_mm": "Width [mm]",          # [CLAUDE FIX W1] prima "Remaining Length [mm]"
             "lotto_number": "Lotto Father",
             "lotto_figlio": "Component Code"
         })
@@ -1773,7 +1781,7 @@ elif st.session_state.current_page == "PROD_HUB":
         dropdown_options_df = display_df.copy()
         cols_order = [
             "ID", "grade", "thickness", "yield_mpa", "uts_mpa", "elongation_pct", 
-            "Remaining Weight [TON]", "Remaining Length [mm]", "Lotto Father", "Component Code", "provider", "Status", "real_db_id"
+            "Remaining Weight [TON]", "Width [mm]", "Lotto Father", "Component Code", "provider", "Status", "real_db_id"
         ]
         table_display_view = display_df[[c for c in cols_order if c in display_df.columns and c != "real_db_id"]]
         #EZIO LOW STOCK 
@@ -1868,7 +1876,8 @@ elif st.session_state.current_page == "PROD_HUB":
                         db_weight_kg = float(selected_row.get("coil_weight_kg", 0.0) or 0.0)
                         initial_weight_tons = db_weight_kg / 1000.0 if db_weight_kg else 0.0
                         new_weight_tons = st.number_input("Coil Weight [TON]", value=initial_weight_tons, step=1.0, format="%.3f")
-                        new_length = st.number_input("Coil Length [mm]", value=float(selected_row.get("coil_length_mm", 0.0)), step=100.0)
+                        # [CLAUDE FIX W1] coil_length_mm = LARGHEZZA coil: prima "Coil Length [mm]"
+                        new_length = st.number_input("Coil Width [mm]", value=float(selected_row.get("coil_length_mm", 0.0)), step=10.0)
                         val_padre = selected_row.get("lotto_number", "") if pd.notna(selected_row.get("lotto_number")) else ""
                         val_figlio = selected_row.get("lotto_figlio", "") if pd.notna(selected_row.get("lotto_figlio")) else ""
                         new_lotto_padre = st.text_input("Lotto Father", value=str(val_padre))
@@ -1904,14 +1913,14 @@ elif st.session_state.current_page == "PROD_HUB":
                     
                     base_lotto = selected_row.get('lotto_figlio') if pd.notna(selected_row.get('lotto_figlio')) else selected_row.get('lotto_number', '')
                     
-                    st.write(f"Available to split: **{current_w_tons:.3f} TON** / **{current_l:.2f} mm**")
+                    st.write(f"Available to split: **{current_w_tons:.3f} TON** / Width **{current_l:.2f} mm**")   # [CLAUDE FIX W1]
                     
                     num_children = st.number_input("Number of Components", min_value=2, max_value=10, value=2, step=1)
                     
                     with st.form(key=f"split_form_{selected_prod_id}"):
                         children_inputs = []
                         letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                        weight_per_mm_kg = current_w_kg / current_l if current_l > 0 else 0.0
+                        weight_per_mm_kg = current_w_kg / current_l if current_l > 0 else 0.0   # [CLAUDE FIX W1] peso per mm di LARGHEZZA
                         
                         for i in range(int(num_children)):
                             st.markdown(f"**Component {i+1} ({letters[i]})**")
@@ -1919,7 +1928,7 @@ elif st.session_state.current_page == "PROD_HUB":
                             with cc1:
                                 c_lotto = st.text_input(f"Component Code {i+1}", value=f"{base_lotto}-{letters[i]}", key=f"split_lotto_{selected_prod_id}_{i}")
                             with cc2:
-                                c_length = st.number_input(f"Length {i+1} [mm]", min_value=0.0, max_value=current_l, value=0.0, key=f"split_l_{selected_prod_id}_{i}")
+                                c_length = st.number_input(f"Width {i+1} [mm]", min_value=0.0, max_value=current_l, value=0.0, key=f"split_l_{selected_prod_id}_{i}")
                             with cc3:
                                 c_weight_kg = c_length * weight_per_mm_kg
                                 c_weight_tons = c_weight_kg / 1000.0
@@ -1932,7 +1941,7 @@ elif st.session_state.current_page == "PROD_HUB":
                         if st.form_submit_button("Confirm Split & Close Parent", use_container_width=True):
                             total_l = sum(c["length"] for c in children_inputs)
                             if total_l > current_l:
-                                st.error("Sum of child lengths exceeds parent remaining length!")
+                                st.error("Sum of child widths exceeds parent coil width!")   # [CLAUDE FIX W1]
                             else:
                                 split_cloud_material(selected_prod_id, children_inputs, auto_promote_rd=True)
                                 for idx in range(int(num_children)):
@@ -1968,7 +1977,8 @@ elif st.session_state.current_page == "PROD_HUB":
                     lotto_figlio = st.text_input("7. Component Code", value="")
                     provider = st.text_input("8. Material Supplier", value="")
                     coil_weight_tons = st.number_input("9. Coil Weight [TON]", value=None, step=10.0, format="%.3f")
-                    coil_length = st.number_input("10. Coil Length [mm]", value=None, step=1000.0)
+                    # [CLAUDE FIX W1] coil_length_mm = LARGHEZZA coil: prima "10. Coil Length [mm]"
+                    coil_length = st.number_input("10. Coil Width [mm]", value=None, step=10.0)
                 
                 uploaded_cert = st.file_uploader("Upload Test Certificate (.pdf, .png, .jpg)", type=["pdf", "png", "jpg", "jpeg"])
                 
@@ -2012,13 +2022,17 @@ elif st.session_state.current_page == "PROD_HUB":
                             df_upload["lotto_figlio"] = None
                         if "coil_weight_kg" in df_upload.columns and "coil_weight_TON" not in df_upload.columns:
                             df_upload = df_upload.rename(columns={"coil_weight_kg": "coil_weight_TON"})
+                        # [CLAUDE FIX W1] il file Excel può usare la colonna "coil_width_mm" (nuova) o "coil_length_mm" (vecchia)
+                        if "coil_width_mm" in df_upload.columns and "coil_length_mm" not in df_upload.columns:
+                            df_upload = df_upload.rename(columns={"coil_width_mm": "coil_length_mm"})
 
                     for col in ["grade", "lotto_number", "lotto_figlio", "provider"]:
                         if col in df_upload.columns:
                             df_upload[col] = df_upload[col].astype(str).str.strip()
                             df_upload[col] = df_upload[col].apply(lambda x: None if x in ["nan", "None", ""] else x)
 
-                    st.dataframe(df_upload, use_container_width=True, hide_index=True)
+                    # [CLAUDE FIX W1] in anteprima la colonna larghezza è mostrata come "coil_width_mm"
+                    st.dataframe(df_upload.rename(columns={"coil_length_mm": "coil_width_mm"}), use_container_width=True, hide_index=True)
 
                     if st.button("Import Batches to Database", use_container_width=True):
                         success_count = 0
@@ -2040,7 +2054,7 @@ elif st.session_state.current_page == "PROD_HUB":
                                 lotto_son = r.get("lotto_figlio")
                                 provider = str(r.get("provider", ""))
                                 w_tons = safe_float(r.get("coil_weight_TON", 0.0))
-                                l_mm = safe_float(r.get("coil_length_mm", 0.0))
+                                l_mm = safe_float(r.get("coil_length_mm", 0.0))   # [CLAUDE FIX W1] = larghezza coil [mm]
                                 
                                 insert_cloud_material(
                                     grade=grade, thickness=thickness, yield_mpa=yield_val, uts_mpa=uts_val, elongation=elong_val,
