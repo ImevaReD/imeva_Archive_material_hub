@@ -192,6 +192,31 @@ def init_supabase_client():
 
 supabase_client = init_supabase_client()
 
+# [CLAUDE FIX C1] -------------------------------------------------------------------------------------------------
+# PROBLEMA: upload certificati -> errore 403 "Invalid Compact JWS".
+# Causa: SUPABASE_KEY è una chiave del nuovo formato "sb_secret_..." (non è un JWT). La libreria supabase-py la invia
+# anche nell'header "Authorization: Bearer ...", e lo Storage di Supabase prova a verificarla come JWT -> rifiuto.
+# La documentazione Supabase indica di inviare le chiavi publishable/secret SOLO nell'header "apikey".
+# SOLUZIONE: client Storage dedicato che invia la chiave solo nell'header "apikey" quando la chiave è "sb_...".
+# Con le chiavi legacy (JWT "eyJ...") si continua a usare il client standard, come prima.
+@st.cache_resource
+def init_storage_client():
+    url = st.secrets["connections"]["supabase"]["SUPABASE_URL"].rstrip("/")
+    key = st.secrets["connections"]["supabase"]["SUPABASE_KEY"]
+    if str(key).startswith("sb_"):
+        from storage3 import SyncStorageClient
+        return SyncStorageClient(f"{url}/storage/v1/", headers={"apikey": key})
+    return supabase_client.storage
+
+storage_client = init_storage_client()
+
+
+def _safe_storage_name(name):
+    """[CLAUDE FIX C1] Nome file sicuro per lo Storage: spazi e caratteri speciali sostituiti con '_'."""
+    import re
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(name))
+# [END CLAUDE FIX C1] ---------------------------------------------------------------------------------------------
+
 st.cache_data.clear()
 try:
     conn = st.connection("supabase", type="sql")
@@ -203,17 +228,18 @@ def upload_certificate_to_cloud(uploaded_file, lotto_identifier):
     """Uploads a certificate file to the Supabase 'certificate_storage' bucket and returns its public URL."""
     try:
         file_ext = uploaded_file.name.split('.')[-1]
-        file_path = f"certs/{lotto_identifier}_{int(time.time())}.{file_ext}"
+        file_path = f"certs/{_safe_storage_name(lotto_identifier)}_{int(time.time())}.{file_ext}"   # [CLAUDE FIX C1] nome sicuro
         
         # Push bytes to Supabase Storage
-        supabase_client.storage.from_("certificate_storage").upload(
+        # [CLAUDE FIX C1] storage_client al posto di supabase_client.storage (vedi init_storage_client)
+        storage_client.from_("certificate_storage").upload(
             path=file_path,
             file=uploaded_file.getvalue(),
             file_options={"content-type": uploaded_file.type, "upsert": "true"}
         )
         
         # Retrieve public URL
-        public_url = supabase_client.storage.from_("certificate_storage").get_public_url(file_path)
+        public_url = storage_client.from_("certificate_storage").get_public_url(file_path)   # [CLAUDE FIX C1]
         return public_url
     except Exception as e:
         st.error(f"Cloud Storage Upload Error: {e}")
@@ -529,17 +555,20 @@ def update_cloud_material(
     uploaded_file=None 
 ):
     cert_url = None
+    cert_upload_ok = True   # [CLAUDE FIX C1] esito upload restituito al chiamante
     if uploaded_file is not None:
-        file_path = f"certs/{mat_id}_{uploaded_file.name}"
+        file_path = f"certs/{mat_id}_{_safe_storage_name(uploaded_file.name)}"   # [CLAUDE FIX C1] nome sicuro
         try:
-            supabase_client.storage.from_("certificate_storage").upload(
+            # [CLAUDE FIX C1] storage_client al posto di supabase_client.storage (vedi init_storage_client)
+            storage_client.from_("certificate_storage").upload(
                 file_path, 
                 uploaded_file.getvalue(), 
                 file_options={"upsert": "true", "content-type": uploaded_file.type}
             )
-            res = supabase_client.storage.from_("certificate_storage").get_public_url(file_path)
+            res = storage_client.from_("certificate_storage").get_public_url(file_path)   # [CLAUDE FIX C1]
             cert_url = res.get("publicUrl") or res.get("public_url") if isinstance(res, dict) else res
         except Exception as e:
+            cert_upload_ok = False   # [CLAUDE FIX C1]
             st.error(f"Detailed Upload Error: {str(e)}")
 
     # [CLAUDE FIX B3] -----------------------------------------------------------------------------------------------
@@ -593,6 +622,7 @@ def update_cloud_material(
             }
         )
         s.commit()
+    return cert_upload_ok   # [CLAUDE FIX C1] False = dati salvati ma certificato NON caricato
     # [END CLAUDE FIX B3] -------------------------------------------------------------------------------------------
 
 #########################################################################################################################################################
@@ -1902,7 +1932,9 @@ elif st.session_state.current_page == "PROD_HUB":
                         )        
                         if st.form_submit_button("💾 Save Changes", use_container_width=True):
                             cert_file_obj = new_certificate if 'new_certificate' in locals() else None            
-                            update_cloud_material(
+                            # [CLAUDE FIX C1] Prima compariva "Batch updated successfully!" anche se l'upload falliva,
+                            # e lo st.rerun() cancellava subito il messaggio di errore. Ora si controlla l'esito.
+                            cert_ok = update_cloud_material(
                                 selected_prod_id, 
                                 grade=new_grade, thickness=new_thickness, 
                                 yield_mpa=new_yield, uts_mpa=new_uts, 
@@ -1911,9 +1943,12 @@ elif st.session_state.current_page == "PROD_HUB":
                                 coil_weight_kg=new_weight_tons * 1000.0, coil_length_mm=new_length,
                                 uploaded_file=cert_file_obj  
                             )
-                            st.success("Batch updated successfully!")
                             st.cache_data.clear()
-                            st.rerun()
+                            if cert_ok:
+                                st.success("Batch updated successfully!")
+                                st.rerun()
+                            else:
+                                st.warning("⚠️ Valori del coil salvati, ma il certificato NON è stato caricato (vedi errore sopra).")
 
                 with st.expander(" Split Coil (Father -> Sons)", expanded=False):
                     rem_w_val = selected_row.get("rd_remaining_weight_kg")
@@ -2010,9 +2045,15 @@ elif st.session_state.current_page == "PROD_HUB":
                         coil_weight=coil_weight_kg_val,
                         coil_length_mm=coil_length
                     )
-                    st.toast("✅ Batch registered into Production database with 'Standby' status!")
                     st.cache_data.clear()
-                    st.rerun()
+                    # [CLAUDE FIX C1] se il certificato era stato allegato ma l'upload è fallito, il coil è comunque
+                    # registrato: si mostra un avviso e NON si fa rerun (altrimenti l'errore sparirebbe subito).
+                    if uploaded_cert is not None and not cert_url:
+                        st.warning("⚠️ Coil registrato con stato 'Standby', ma il certificato NON è stato caricato (vedi errore sopra). "
+                                   "Puoi caricarlo dopo da 'Edit Selected Batch Values'.")
+                    else:
+                        st.toast("✅ Batch registered into Production database with 'Standby' status!")
+                        st.rerun()
 
         with entry_tab2:
             if "file_uploader_key" not in st.session_state:
