@@ -128,16 +128,17 @@ def open_coil_management_dialog(grade, thick, length, group_rows):
         st.markdown(" ✏️ Edit Selected Batch Values")
         with st.form(key=f"modal_edit_form_{selected_db_id}"):
             new_grade = st.text_input("Grade", value=str(selected_row.get("grade", "")))
-            new_thickness = st.number_input("Thickness [mm]", value=float(selected_row.get("thickness", 0.0)), step=0.1)
-            new_yield = st.number_input("Yield Stress [MPa]", value=float(selected_row.get("yield_mpa", 0.0)), step=5.0)
-            new_uts = st.number_input("Failure Stress [MPa]", value=float(selected_row.get("uts_mpa", 0.0)), step=5.0)
-            new_elong = st.number_input("Elongation [%]", value=float(selected_row.get("elongation_pct", 0.0)), step=0.5)
+            # [CLAUDE FIX B3] valori iniziali letti con _safe_num(): un campo vuoto (NULL) non viene più riscritto come NaN
+            new_thickness = st.number_input("Thickness [mm]", value=_safe_num(selected_row.get("thickness")), step=0.1)
+            new_yield = st.number_input("Yield Stress [MPa]", value=_safe_num(selected_row.get("yield_mpa")), step=5.0)
+            new_uts = st.number_input("Failure Stress [MPa]", value=_safe_num(selected_row.get("uts_mpa")), step=5.0)
+            new_elong = st.number_input("Elongation [%]", value=_safe_num(selected_row.get("elongation_pct")), step=0.5)
 
-            db_weight_kg = float(selected_row.get("coil_weight_kg", 0.0) or 0.0)
+            db_weight_kg = _safe_num(selected_row.get("coil_weight_kg"))   # [CLAUDE FIX B3] valore sicuro (NULL -> 0)
             initial_weight_tons = db_weight_kg / 1000.0 if db_weight_kg else 0.0
             new_weight_tons = st.number_input("Coil Weight [TON]", value=initial_weight_tons, step=1.0, format="%.3f")
             # [CLAUDE FIX W1] coil_length_mm = LARGHEZZA coil: prima "Coil Length [mm]"
-            new_length = st.number_input("Coil Width [mm]", value=float(selected_row.get("coil_length_mm", 0.0)), step=10.0)
+            new_length = st.number_input("Coil Width [mm]", value=_safe_num(selected_row.get("coil_length_mm")), step=10.0)
             
             val_padre = selected_row.get("lotto_number", "") if pd.notna(selected_row.get("lotto_number")) else ""
             val_figlio = selected_row.get("lotto_figlio", "") if pd.notna(selected_row.get("lotto_figlio")) else ""
@@ -503,6 +504,16 @@ def demote_cloud_material(material_id):
         del st.session_state.experimental_curves[material_id]
     st.cache_data.clear()
 
+def _safe_num(val, default=0.0):
+    """[CLAUDE FIX B3] Converte un valore dal DB in float per i campi dei form Edit.
+    Campi lasciati vuoti nel Manual Form vengono salvati come NULL -> NaN in pandas: senza questo controllo
+    il form Edit riceveva NaN come valore iniziale e lo riscriveva nel database."""
+    try:
+        f = float(val)
+        return default if np.isnan(f) else f
+    except (TypeError, ValueError):
+        return default
+
 def update_cloud_material(
     mat_id, 
     grade, 
@@ -531,58 +542,58 @@ def update_cloud_material(
         except Exception as e:
             st.error(f"Detailed Upload Error: {str(e)}")
 
+    # [CLAUDE FIX B3] -----------------------------------------------------------------------------------------------
+    # PROBLEMA: dopo "Save Changes" peso e larghezza nella tabella "Production Batch Queue" non cambiavano.
+    # Causa: l'UPDATE modificava solo coil_weight_kg / coil_length_mm (valori originali), mentre la tabella, le card
+    # del Warehouse e l'R&D Deck mostrano le giacenze residue rd_remaining_weight_kg / rd_remaining_length_mm,
+    # che restavano quelle dell'inserimento iniziale.
+    # SOLUZIONE: le giacenze residue vengono aggiornate della stessa differenza (nuovo - vecchio) applicata al valore
+    # originale. Così:
+    #   - coil appena inserito (residuo = originale)  -> residuo = nuovo valore inserito
+    #   - coil già parzialmente consumato in R&D        -> il consumo registrato viene mantenuto
+    #   - coil padre già splittato (ha figli)          -> il residuo resta 0 (il materiale è nei figli)
+    # In PostgreSQL le espressioni nel SET leggono i valori PRIMA dell'aggiornamento, quindi (:nuovo - coil_weight_kg)
+    # è proprio la differenza tra nuovo e vecchio valore.
+    # Le due query duplicate (con / senza certificato) sono state unificate: certificate_url si aggiorna solo se
+    # è stato caricato un nuovo file (COALESCE con il valore esistente).
     with conn.session as s:
-        if cert_url is not None:
-            s.execute(
-                text("""
-                    UPDATE materials SET 
-                        grade = :grade,
-                        thickness = :thickness,
-                        yield_mpa = :yield_mpa,
-                        uts_mpa = :uts_mpa,
-                        elongation_pct = :elongation_pct,
-                        lotto_number = :lotto_number,
-                        lotto_figlio = :lotto_figlio,
-                        provider = :provider,
-                        coil_weight_kg = :coil_weight_kg,
-                        coil_length_mm = :coil_length_mm,
-                        certificate_url = :certificate_url
-                    WHERE id = :id
-                """),
-                params={
-                    "id": int(mat_id), "grade": grade, "thickness": float(thickness),
-                    "yield_mpa": float(yield_mpa), "uts_mpa": float(uts_mpa),
-                    "elongation_pct": float(elongation_pct), "lotto_number": lotto_number,
-                    "lotto_figlio": lotto_figlio, "provider": provider,
-                    "coil_weight_kg": float(coil_weight_kg), "coil_length_mm": float(coil_length_mm),
-                    "certificate_url": cert_url
-                }
-            )
-        else:
-            s.execute(
-                text("""
-                    UPDATE materials SET 
-                        grade = :grade,
-                        thickness = :thickness,
-                        yield_mpa = :yield_mpa,
-                        uts_mpa = :uts_mpa,
-                        elongation_pct = :elongation_pct,
-                        lotto_number = :lotto_number,
-                        lotto_figlio = :lotto_figlio,
-                        provider = :provider,
-                        coil_weight_kg = :coil_weight_kg,
-                        coil_length_mm = :coil_length_mm
-                    WHERE id = :id
-                """),
-                params={
-                    "id": int(mat_id), "grade": grade, "thickness": float(thickness),
-                    "yield_mpa": float(yield_mpa), "uts_mpa": float(uts_mpa),
-                    "elongation_pct": float(elongation_pct), "lotto_number": lotto_number,
-                    "lotto_figlio": lotto_figlio, "provider": provider,
-                    "coil_weight_kg": float(coil_weight_kg), "coil_length_mm": float(coil_length_mm)
-                }
-            )
+        s.execute(
+            text("""
+                UPDATE materials SET 
+                    grade = :grade,
+                    thickness = :thickness,
+                    yield_mpa = :yield_mpa,
+                    uts_mpa = :uts_mpa,
+                    elongation_pct = :elongation_pct,
+                    lotto_number = :lotto_number,
+                    lotto_figlio = :lotto_figlio,
+                    provider = :provider,
+                    rd_remaining_weight_kg = CASE
+                        WHEN EXISTS (SELECT 1 FROM materials c WHERE c.parent_id = materials.id) THEN 0.0
+                        ELSE GREATEST(0.0, COALESCE(rd_remaining_weight_kg, coil_weight_kg, 0.0)
+                                           + (:coil_weight_kg - COALESCE(coil_weight_kg, 0.0)))
+                    END,
+                    rd_remaining_length_mm = CASE
+                        WHEN EXISTS (SELECT 1 FROM materials c WHERE c.parent_id = materials.id) THEN 0.0
+                        ELSE GREATEST(0.0, COALESCE(rd_remaining_length_mm, coil_length_mm, 0.0)
+                                           + (:coil_length_mm - COALESCE(coil_length_mm, 0.0)))
+                    END,
+                    coil_weight_kg = :coil_weight_kg,
+                    coil_length_mm = :coil_length_mm,
+                    certificate_url = COALESCE(:certificate_url, certificate_url)
+                WHERE id = :id
+            """),
+            params={
+                "id": int(mat_id), "grade": grade, "thickness": float(thickness),
+                "yield_mpa": float(yield_mpa), "uts_mpa": float(uts_mpa),
+                "elongation_pct": float(elongation_pct), "lotto_number": lotto_number,
+                "lotto_figlio": lotto_figlio, "provider": provider,
+                "coil_weight_kg": float(coil_weight_kg), "coil_length_mm": float(coil_length_mm),
+                "certificate_url": cert_url
+            }
+        )
         s.commit()
+    # [END CLAUDE FIX B3] -------------------------------------------------------------------------------------------
 
 #########################################################################################################################################################
 
@@ -1869,15 +1880,16 @@ elif st.session_state.current_page == "PROD_HUB":
                 with st.expander("✏️ Edit Selected Batch Values"):
                     with st.form(key=f"edit_form_{selected_prod_id}"):
                         new_grade = st.text_input("Grade", value=str(selected_row.get("grade", "")))
-                        new_thickness = st.number_input("Thickness [mm]", value=float(selected_row.get("thickness", 0.0)), step=0.1)
-                        new_yield = st.number_input("Yield Stress [MPa]", value=float(selected_row.get("yield_mpa", 0.0)), step=5.0)
-                        new_uts = st.number_input("Failure Stress [MPa]", value=float(selected_row.get("uts_mpa", 0.0)), step=5.0)
-                        new_elong = st.number_input("Elongation [%]", value=float(selected_row.get("elongation_pct", 0.0)), step=0.5)
-                        db_weight_kg = float(selected_row.get("coil_weight_kg", 0.0) or 0.0)
+                        # [CLAUDE FIX B3] valori iniziali letti con _safe_num(): un campo vuoto (NULL) non viene più riscritto come NaN
+                        new_thickness = st.number_input("Thickness [mm]", value=_safe_num(selected_row.get("thickness")), step=0.1)
+                        new_yield = st.number_input("Yield Stress [MPa]", value=_safe_num(selected_row.get("yield_mpa")), step=5.0)
+                        new_uts = st.number_input("Failure Stress [MPa]", value=_safe_num(selected_row.get("uts_mpa")), step=5.0)
+                        new_elong = st.number_input("Elongation [%]", value=_safe_num(selected_row.get("elongation_pct")), step=0.5)
+                        db_weight_kg = _safe_num(selected_row.get("coil_weight_kg"))   # [CLAUDE FIX B3] valore sicuro (NULL -> 0)
                         initial_weight_tons = db_weight_kg / 1000.0 if db_weight_kg else 0.0
                         new_weight_tons = st.number_input("Coil Weight [TON]", value=initial_weight_tons, step=1.0, format="%.3f")
                         # [CLAUDE FIX W1] coil_length_mm = LARGHEZZA coil: prima "Coil Length [mm]"
-                        new_length = st.number_input("Coil Width [mm]", value=float(selected_row.get("coil_length_mm", 0.0)), step=10.0)
+                        new_length = st.number_input("Coil Width [mm]", value=_safe_num(selected_row.get("coil_length_mm")), step=10.0)
                         val_padre = selected_row.get("lotto_number", "") if pd.notna(selected_row.get("lotto_number")) else ""
                         val_figlio = selected_row.get("lotto_figlio", "") if pd.notna(selected_row.get("lotto_figlio")) else ""
                         new_lotto_padre = st.text_input("Lotto Father", value=str(val_padre))
