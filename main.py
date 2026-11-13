@@ -199,16 +199,53 @@ supabase_client = init_supabase_client()
 # La documentazione Supabase indica di inviare le chiavi publishable/secret SOLO nell'header "apikey".
 # SOLUZIONE: client Storage dedicato che invia la chiave solo nell'header "apikey" quando la chiave è "sb_...".
 # Con le chiavi legacy (JWT "eyJ...") si continua a usare il client standard, come prima.
+# [CLAUDE FIX C2] -------------------------------------------------------------------------------------------------
+# Sostituisce la soluzione C1b (che disattivava lo Storage con le chiavi "sb_..."): le chiavi JWT legacy saranno
+# ritirate da Supabase a inizio 2027, quindi l'app deve funzionare con le chiavi nuove "sb_secret_...".
+# Funzionamento delle chiavi nuove (documentazione API gateway Supabase): la chiave va inviata SOLO nell'header
+# "apikey"; il gateway riconosce la chiave del progetto e la sostituisce con un token JWT interno valido per lo Storage.
+# Diagnosi errori visti:
+#   - 403 "Invalid Compact JWS"                          -> chiave inviata anche come Authorization: Bearer (C1)
+#   - 400 "headers must have required property 'authorization'" -> il gateway NON ha riconosciuto la chiave:
+#       chiave non valida per questo progetto (revocata, di un altro progetto o copiata incompleta).
+# Configurazione (.streamlit/secrets.toml, sezione [connections.supabase]):
+#   - SUPABASE_STORAGE_KEY (opzionale) = chiave usata solo per lo Storage; se assente si usa SUPABASE_KEY
+#   - chiave "sb_..."  -> client Storage con solo header "apikey"
+#   - chiave "eyJ..." (legacy, finché disponibile) -> client standard (Authorization: Bearer)
+STORAGE_KEY_MISSING_MSG = (
+    "Upload certificati non disponibile: nessuna chiave Supabase configurata per lo Storage "
+    "(SUPABASE_STORAGE_KEY o SUPABASE_KEY in .streamlit/secrets.toml)."
+)
+
 @st.cache_resource
 def init_storage_client():
-    url = st.secrets["connections"]["supabase"]["SUPABASE_URL"].rstrip("/")
-    key = st.secrets["connections"]["supabase"]["SUPABASE_KEY"]
-    if str(key).startswith("sb_"):
+    sb_conf = st.secrets["connections"]["supabase"]
+    url = sb_conf["SUPABASE_URL"].rstrip("/")
+    key = str(sb_conf.get("SUPABASE_STORAGE_KEY") or sb_conf.get("SUPABASE_KEY") or "").strip()
+    if not key:
+        return None
+    if key.startswith("sb_"):
         from storage3 import SyncStorageClient
         return SyncStorageClient(f"{url}/storage/v1/", headers={"apikey": key})
-    return supabase_client.storage
+    if key == str(sb_conf.get("SUPABASE_KEY") or "").strip():
+        return supabase_client.storage
+    return create_client(url, key).storage
 
 storage_client = init_storage_client()
+
+
+def _storage_error_hint(err):
+    """[CLAUDE FIX C2] Traduce gli errori di autenticazione dello Storage in un'indicazione pratica."""
+    msg = str(err)
+    if "property 'authorization'" in msg or "Invalid Compact JWS" in msg:
+        return (" → La chiave Supabase non è stata riconosciuta dal progetto. In Supabase: Settings → API Keys → "
+                "'Secret keys': crea/visualizza la chiave sb_secret_..., copiala PER INTERO e incollala in "
+                ".streamlit/secrets.toml come SUPABASE_KEY (o SUPABASE_STORAGE_KEY). Controlla anche che "
+                "SUPABASE_URL sia quello dello stesso progetto. Poi riavvia l'app.")
+    if "Bucket not found" in msg:
+        return " → In Supabase: Storage → crea il bucket 'certificate_storage' (pubblico)."
+    return ""
+# [END CLAUDE FIX C2] ---------------------------------------------------------------------------------------------
 
 
 def _safe_storage_name(name):
@@ -226,6 +263,9 @@ except Exception as e:
 
 def upload_certificate_to_cloud(uploaded_file, lotto_identifier):
     """Uploads a certificate file to the Supabase 'certificate_storage' bucket and returns its public URL."""
+    if storage_client is None:   # [CLAUDE FIX C1b/C2] nessuna chiave Storage configurata
+        st.error(STORAGE_KEY_MISSING_MSG)
+        return None
     try:
         file_ext = uploaded_file.name.split('.')[-1]
         file_path = f"certs/{_safe_storage_name(lotto_identifier)}_{int(time.time())}.{file_ext}"   # [CLAUDE FIX C1] nome sicuro
@@ -242,7 +282,7 @@ def upload_certificate_to_cloud(uploaded_file, lotto_identifier):
         public_url = storage_client.from_("certificate_storage").get_public_url(file_path)   # [CLAUDE FIX C1]
         return public_url
     except Exception as e:
-        st.error(f"Cloud Storage Upload Error: {e}")
+        st.error(f"Cloud Storage Upload Error: {e}{_storage_error_hint(e)}")   # [CLAUDE FIX C2] + suggerimento
         return None
 
 @st.dialog("Supplier Mill Certificate Viewer", width="large")
@@ -556,7 +596,10 @@ def update_cloud_material(
 ):
     cert_url = None
     cert_upload_ok = True   # [CLAUDE FIX C1] esito upload restituito al chiamante
-    if uploaded_file is not None:
+    if uploaded_file is not None and storage_client is None:   # [CLAUDE FIX C1b/C2] nessuna chiave Storage configurata
+        cert_upload_ok = False
+        st.error(STORAGE_KEY_MISSING_MSG)
+    elif uploaded_file is not None:
         file_path = f"certs/{mat_id}_{_safe_storage_name(uploaded_file.name)}"   # [CLAUDE FIX C1] nome sicuro
         try:
             # [CLAUDE FIX C1] storage_client al posto di supabase_client.storage (vedi init_storage_client)
@@ -569,7 +612,7 @@ def update_cloud_material(
             cert_url = res.get("publicUrl") or res.get("public_url") if isinstance(res, dict) else res
         except Exception as e:
             cert_upload_ok = False   # [CLAUDE FIX C1]
-            st.error(f"Detailed Upload Error: {str(e)}")
+            st.error(f"Detailed Upload Error: {str(e)}{_storage_error_hint(e)}")   # [CLAUDE FIX C2] + suggerimento
 
     # [CLAUDE FIX B3] -----------------------------------------------------------------------------------------------
     # PROBLEMA: dopo "Save Changes" peso e larghezza nella tabella "Production Batch Queue" non cambiavano.
