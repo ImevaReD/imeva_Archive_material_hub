@@ -1882,7 +1882,7 @@ elif st.session_state.current_page == "PROD_HUB":
         display_df = prod_df[[
             "id", "grade", "thickness", "yield_mpa", "uts_mpa", "elongation_pct", 
             "current_weight_tons", "current_length_mm", "lotto_number", "lotto_figlio", "provider", 
-            "rd_remaining_weight_kg", "is_promoted", "quality_status"
+            "rd_remaining_weight_kg", "is_promoted", "quality_status", "hub_section"   # [CLAUDE FIX A2b] + hub_section
         ]].copy()
         
         display_df = display_df.sort_values(by="id").reset_index(drop=True)
@@ -1892,6 +1892,15 @@ elif st.session_state.current_page == "PROD_HUB":
 
     
         def determine_status(row):
+            # [CLAUDE FIX A2b] -----------------------------------------------------------------------------------
+            # Nella tabella "Production Batch Queue" i coil già passati in R&D (figli dello split o "Move to R&D")
+            # mostrano sempre "🔬 R&D", così si vede subito che non sono più disponibili in produzione.
+            # Lo stato qualità ereditato (es. "Verified ✅", fix A2) resta salvato nel database e viene mostrato
+            # nell'area R&D Deck (riga "Status:" della card del coil).
+            hub_sec = str(row.get("hub_section") or "PROD").strip().upper()
+            if row.get("is_promoted") == 1 or hub_sec == "RD":
+                return "🔬 R&D"
+            # [END CLAUDE FIX A2b] -------------------------------------------------------------------------------
             q_status = row.get("quality_status")
             if q_status and pd.notna(q_status) and str(q_status).strip() != "":
                 return str(q_status)
@@ -1903,7 +1912,7 @@ elif st.session_state.current_page == "PROD_HUB":
                 return "🟢 Standby"
 
         display_df["Status"] = display_df.apply(determine_status, axis=1)
-        display_df = display_df.drop(columns=["id", "rd_remaining_weight_kg", "is_promoted", "quality_status"])
+        display_df = display_df.drop(columns=["id", "rd_remaining_weight_kg", "is_promoted", "quality_status", "hub_section"])   # [CLAUDE FIX A2b]
         
         display_df = display_df.rename(columns={
             "current_weight_tons": "Remaining Weight [TON]",
