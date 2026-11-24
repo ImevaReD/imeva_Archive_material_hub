@@ -821,7 +821,7 @@ if st.session_state.current_page == "HOME":
     logo_left, logo_mid, logo_right = st.columns([3, 1, 3])
     with logo_mid:
         if os.path.exists("imeva_logo.jpg"):
-            st.image("imeva_logo.jpg", width=200)
+            st.image("imeva_logo.jpg", width=50)
         elif os.path.exists("imeva.jpg"):
             st.image("imeva.jpg", width=200)
             
