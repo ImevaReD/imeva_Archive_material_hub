@@ -1186,7 +1186,7 @@ elif st.session_state.current_page == "RD_DECK":
                 status_badge = "✅ Cert ≥ EN min" if is_compliant else f"⚠️ Cert yield < EN min ({limits['min_yield']} MPa)"
                 location_badge = "🔬 In R&D" if info.get("in_rd") else "🏭 In Produzione"
                 st.markdown(
-                    f"**Quality:** {info.get('quality_status')} | {location_badge} | **Cert vs EN:** {status_badge} | "
+                    f"**Status:** {info.get('quality_status')} | {location_badge} | **Cert vs EN:** {status_badge} | "
                     f"{inv_badge} | **Stock:** {rem_weight/1000.0:.1f} TON / W {rem_len:.1f} mm"   # [CLAUDE FIX W1] W = larghezza
                 )
                 
