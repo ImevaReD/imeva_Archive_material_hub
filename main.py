@@ -469,22 +469,54 @@ def split_cloud_material(parent_id, children_list, auto_promote_rd=True):
         # Determine promotion status based on the flag
         promoted_val = 1 if auto_promote_rd else 0
 
+        # [CLAUDE FIX A2] -----------------------------------------------------------------------------------------
+        # PROBLEMA: i coil figli venivano creati SENZA stato qualità e senza i dati di laboratorio del padre.
+        # Un padre "Verified ✅" generava figli con stato vuoto -> in R&D il filtro "Verified" non li trovava e
+        # la verifica di laboratorio andava persa proprio nel passaggio Produzione -> R&D.
+        # SOLUZIONE: i figli sono lo stesso acciaio del padre (stessa colata, stesse prove), quindi ereditano:
+        #   - quality_status (Verified / Standby / ...)
+        #   - risultati prove di trazione dog-bone (calculated_*, experimental_curves_json)
+        #   - analisi chimica spettrometro (spectrometer_data_json, *_pct, carbon_equivalent_cev)
+        #   - codice commerciale e descrizione (codice, description)
+        # Le colonne vengono copiate solo se presenti nella tabella (lista fissa, nessun input utente nella query).
+        INHERITED_COLUMNS = [
+            "quality_status", "codice", "description",
+            "calculated_e_gpa", "calculated_sigy_mpa", "calculated_uts_mpa", "calculated_elongation_pct",
+            "experimental_curves_json", "spectrometer_data_json", "carbon_equivalent_cev",
+            "c_pct", "si_pct", "mn_pct", "p_pct", "s_pct", "cr_pct", "mo_pct", "ni_pct", "cu_pct", "al_pct",
+            "as_pct", "nb_pct", "sn_pct", "ti_pct", "w_pct", "b_pct", "co_pct", "pb_pct", "v_pct", "zn_pct",
+            "mg_pct", "ce_pct", "la_pct", "fe_pct",
+        ]
+        inherited_cols = [c for c in INHERITED_COLUMNS if c in parent_res.keys()]
+        inherited_values = {}
+        for c in inherited_cols:
+            v = parent_res[c]
+            # spectrometer_data_json è JSONB: il driver lo restituisce come dict -> va riconvertito in testo JSON
+            if isinstance(v, (dict, list)):
+                v = json.dumps(v)
+            inherited_values[f"inh_{c}"] = v
+        inh_cols_sql = "".join(f", {c}" for c in inherited_cols)
+        inh_vals_sql = "".join(f", :inh_{c}" for c in inherited_cols)
+        new_child_ids = []
+        # [END CLAUDE FIX A2] -------------------------------------------------------------------------------------
+
         # Insert each child dynamically
         for child in children_list:
-            s.execute(
-                text("""
+            res_child = s.execute(
+                text(f"""
                     INSERT INTO materials (
                         parent_id, family, hub_section, grade, thickness, 
                         yield_mpa, uts_mpa, elongation_pct, coil_weight_kg, 
                         coil_length_mm, rd_remaining_weight_kg, rd_remaining_length_mm, 
-                        lotto_number, lotto_figlio, provider, certificate_url, is_promoted
+                        lotto_number, lotto_figlio, provider, certificate_url, is_promoted{inh_cols_sql}
                     ) VALUES (
                         :parent_id, :family, :hub_section, :grade, :thickness, 
                         :yield_mpa, :uts_mpa, :elongation_pct, :coil_weight_kg, 
                         :coil_length_mm, :rd_remaining_weight_kg, :rd_remaining_length_mm, 
-                        :lotto_number, :lotto_figlio, :provider, :certificate_url, :is_promoted
+                        :lotto_number, :lotto_figlio, :provider, :certificate_url, :is_promoted{inh_vals_sql}
                     )
-                """),
+                    RETURNING id
+                """),   # [CLAUDE FIX A2] aggiunte colonne ereditate + RETURNING id del figlio
                 {
                     "parent_id": parent_id,
                     "family": parent_res.get("family", "METALS"),
@@ -502,9 +534,11 @@ def split_cloud_material(parent_id, children_list, auto_promote_rd=True):
                     "lotto_figlio": child["lotto"],
                     "provider": parent_res["provider"],
                     "certificate_url": parent_res.get("certificate_url"),
-                    "is_promoted": promoted_val
+                    "is_promoted": promoted_val,
+                    **inherited_values   # [CLAUDE FIX A2] valori ereditati dal padre
                 }
             )
+            new_child_ids.append(int(res_child.scalar()))   # [CLAUDE FIX A2]
 
         
         s.execute(
@@ -517,6 +551,17 @@ def split_cloud_material(parent_id, children_list, auto_promote_rd=True):
             {"id": int(parent_id)}
         )
         s.commit()
+
+    # [CLAUDE FIX A2] Copia nella sessione corrente dei dati di laboratorio/chimica del padre sui figli:
+    # le cache st.session_state vengono caricate solo all'avvio, senza questa copia i figli apparirebbero in R&D
+    # senza curve e analisi chimica fino al riavvio dell'app.
+    pid = int(parent_id)
+    for cache_name in ("experimental_curves", "chemical_reports"):
+        cache = st.session_state.get(cache_name)
+        if isinstance(cache, dict) and pid in cache:
+            for cid in new_child_ids:
+                cache[cid] = cache[pid]
+    return new_child_ids
 
 def log_material_consumption(material_id, weight_used_kg, length_used_mm, notes=""):
     """Deducts used weight/length from the selected material batch safely and clears cache."""
