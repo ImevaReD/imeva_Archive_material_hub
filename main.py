@@ -1798,6 +1798,10 @@ elif st.session_state.current_page == "PROD_HUB":
                 """)
             with qv_col2:
                 st.markdown("#### 📊 Enter 3 Tensile Test Samples")
+                # [CLAUDE FIX A5] esito dell'ultima valutazione (mostrato una sola volta dopo il salvataggio)
+                _qv_last = st.session_state.pop("qv_last_result", None)
+                if _qv_last and _qv_last[0] == int(selected_qv_id):
+                    {"success": st.success, "info": st.info, "error": st.error}[_qv_last[1]](_qv_last[2])
                 with st.form(key=f"quality_verification_form_{selected_qv_id}"):
                     st.markdown("**1. Yield Stress ($\sigma_{yield}$ - MPa)**")
                     y1, y2, y3 = st.columns(3)
@@ -1823,43 +1827,57 @@ elif st.session_state.current_page == "PROD_HUB":
                         if any(val is None for val in inputs_list):
                             st.warning(" Please fill in all 9 tensile test input fields before evaluating.")
                         else:
+                            # [CLAUDE FIX A5] -------------------------------------------------------------------------
+                            # PROBLEMA: il calcolo delle tolleranze, la valutazione e il salvataggio erano FUORI da
+                            # questo "else" (errore di indentazione). Premendo il pulsante con campi vuoti compariva
+                            # l'avviso ma il codice proseguiva e l'app andava in errore (NameError: ref_y / avg_y).
+                            # SOLUZIONE: tutto il blocco di valutazione e salvataggio è stato spostato dentro l'"else":
+                            # viene eseguito solo quando tutti i 9 campi sono compilati.
+                            # Inoltre i valori di riferimento del certificato sono letti con _safe_num() (vuoto -> 0,
+                            # invece di NaN che faceva risultare sempre "Rejected").
                             avg_y = (t1_y + t2_y + t3_y) / 3.0
                             avg_u = (t1_u + t2_u + t3_u) / 3.0
                             avg_e = (t1_e + t2_e + t3_e) / 3.0
                             
-                            ref_y = float(qv_row.get('yield_mpa', 0.0))
-                            ref_u = float(qv_row.get('uts_mpa', 0.0))
-                            ref_e = float(qv_row.get('elongation_pct', 0.0))
+                            ref_y = _safe_num(qv_row.get('yield_mpa'))
+                            ref_u = _safe_num(qv_row.get('uts_mpa'))
+                            ref_e = _safe_num(qv_row.get('elongation_pct'))
                         
-                        #EZIO  tensile testing values 
-                        stress_allowance_mpa = 30.0
-                        elong_allowance_pct = 7.0
+                            #EZIO  tensile testing values 
+                            # [CLAUDE NOTE B1] valori di tolleranza da confermare (il testo a video indica 10 MPa / 5 %)
+                            stress_allowance_mpa = 30.0
+                            elong_allowance_pct = 7.0
 
-                        effective_ref_y = ref_y - stress_allowance_mpa
-                        effective_ref_u = ref_u - stress_allowance_mpa
-                        effective_ref_e = ref_e - elong_allowance_pct
+                            effective_ref_y = ref_y - stress_allowance_mpa
+                            effective_ref_u = ref_u - stress_allowance_mpa
+                            effective_ref_e = ref_e - elong_allowance_pct
 
-                        if avg_y >= ref_y and avg_u >= ref_u and avg_e >= ref_e:
-                            new_status_val = "Verified ✅"
-                            st.success(f"✅ **Fully Verified (Passed)** — Averages meet standard requirements!")
-                        elif avg_y >= effective_ref_y and avg_u >= effective_ref_u and avg_e >= effective_ref_e:
-                            new_status_val = "Verified ✅"
-                            st.info(f"⚠️ **Conditionally Verified (Within Allowance)** — Averages are slightly below standard targets but within the acceptable 10 MPa / 5.0% engineering tolerance buffer.")
-                        else:
-                            new_status_val = "Non-Compliant / Rejected ❌"
-                            st.error(f"❌ **Non-Compliant / Rejected (Failed)** — Averages exceed the allowable engineering tolerance limits.")
-                        
-                        # --- SAVE STATUS TO DATABASE INSTANTLY ---
-                        with conn.session as s:
-                            s.execute(
-                                text("UPDATE materials SET quality_status = :qstat WHERE id = :id"),
-                                {"qstat": new_status_val, "id": int(selected_qv_id)}
-                            )
-                            s.commit()
-                        
-                        st.toast(f"Status updated to '{new_status_val}' in database!", icon="💾")
-                        st.cache_data.clear()
-                        st.rerun()
+                            averages_txt = f"Medie: σ_yield {avg_y:.1f} MPa | σ_uts {avg_u:.1f} MPa | A {avg_e:.1f} %"
+                            if avg_y >= ref_y and avg_u >= ref_u and avg_e >= ref_e:
+                                new_status_val = "Verified ✅"
+                                result_kind, result_msg = "success", f"✅ **Fully Verified (Passed)** — Averages meet standard requirements! {averages_txt}"
+                            elif avg_y >= effective_ref_y and avg_u >= effective_ref_u and avg_e >= effective_ref_e:
+                                new_status_val = "Verified ✅"
+                                result_kind, result_msg = "info", f"⚠️ **Conditionally Verified (Within Allowance)** — Averages are slightly below standard targets but within the acceptable 10 MPa / 5.0% engineering tolerance buffer. {averages_txt}"
+                            else:
+                                new_status_val = "Non-Compliant / Rejected ❌"
+                                result_kind, result_msg = "error", f"❌ **Non-Compliant / Rejected (Failed)** — Averages exceed the allowable engineering tolerance limits. {averages_txt}"
+                            
+                            # --- SAVE STATUS TO DATABASE INSTANTLY ---
+                            with conn.session as s:
+                                s.execute(
+                                    text("UPDATE materials SET quality_status = :qstat WHERE id = :id"),
+                                    {"qstat": new_status_val, "id": int(selected_qv_id)}
+                                )
+                                s.commit()
+                            
+                            # [CLAUDE FIX A5] Prima l'esito (success/info/error) spariva subito per lo st.rerun().
+                            # Ora viene salvato in sessione e mostrato sopra il form dopo il ricaricamento.
+                            st.session_state["qv_last_result"] = (int(selected_qv_id), result_kind, result_msg)
+                            st.toast(f"Status updated to '{new_status_val}' in database!", icon="💾")
+                            st.cache_data.clear()
+                            st.rerun()
+                            # [END CLAUDE FIX A5] -----------------------------------------------------------------------
                         
         else:
             st.info("No batches available for quality verification.")
