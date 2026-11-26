@@ -9,9 +9,9 @@ CREATE TABLE materials (
     uts_mpa REAL,
     elongation_pct REAL,
     coil_weight_kg NUMERIC DEFAULT 0.0,
-    coil_length_mm NUMERIC DEFAULT 0.0,
+    coil_length_mm NUMERIC DEFAULT 0.0,   -- [CLAUDE FIX W1] contiene la LARGHEZZA del coil [mm] (nome colonna invariato)
     rd_remaining_weight_kg NUMERIC DEFAULT 0.0,
-    rd_remaining_length_mm NUMERIC DEFAULT 0.0,
+    rd_remaining_length_mm NUMERIC DEFAULT 0.0,   -- [CLAUDE FIX W1] contiene la LARGHEZZA del coil [mm] (nome colonna invariato)
     rd_notes TEXT DEFAULT '',
     lotto_number TEXT,
     lotto_figlio TEXT,    -- <--- Add this line to your Supabase schema
@@ -73,3 +73,10 @@ ON materials
 FOR ALL 
 USING (true) 
 WITH CHECK (true);
+-- [CLAUDE FIX A6] prove di trazione della Quality Verification (create anche automaticamente dall app)
+ALTER TABLE materials
+    ADD COLUMN IF NOT EXISTS lab_tensile_json JSONB,
+    ADD COLUMN IF NOT EXISTS lab_yield_avg_mpa NUMERIC,
+    ADD COLUMN IF NOT EXISTS lab_uts_avg_mpa NUMERIC,
+    ADD COLUMN IF NOT EXISTS lab_elong_avg_pct NUMERIC,
+    ADD COLUMN IF NOT EXISTS lab_test_date TIMESTAMPTZ;
