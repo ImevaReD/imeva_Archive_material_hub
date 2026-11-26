@@ -90,6 +90,10 @@ def open_coil_management_dialog(grade, thick, length, group_rows):
         base_lotto = selected_row.get('lotto_figlio') if pd.notna(selected_row.get('lotto_figlio')) else selected_row.get('lotto_number', '')
         
         st.info(f"Available to split: **{current_w_tons:.3f} TON** / Width **{current_l:.2f} mm**")   # [CLAUDE FIX W1]
+        # [CLAUDE FIX A3] split consentito solo per coil verificati
+        split_ok, split_msg = _rd_gate(selected_row.get("quality_status"))
+        if not split_ok:
+            st.warning(split_msg)
         
         num_children = st.number_input("Number of Components", min_value=2, max_value=10, value=2, step=1, key=f"modal_num_child_{selected_db_id}")
         
@@ -114,15 +118,19 @@ def open_coil_management_dialog(grade, thick, length, group_rows):
                 children_inputs.append({"lotto": c_lotto, "weight": c_weight_kg, "length": c_length})
                 st.write("---")
                 
-            if st.form_submit_button("Confirm Split & Close Parent", use_container_width=True):
+            if st.form_submit_button("Confirm Split & Close Parent", use_container_width=True, disabled=not split_ok):   # [CLAUDE FIX A3]
                 total_l = sum(c["length"] for c in children_inputs)
                 if total_l > current_l:
                     st.error("Sum of child widths exceeds parent coil width!")   # [CLAUDE FIX W1]
                 else:
-                    split_cloud_material(selected_db_id, children_inputs, auto_promote_rd=True)
-                    st.success("Coil successfully split and pushed to R&D!")
-                    st.cache_data.clear()
-                    st.rerun()
+                    try:   # [CLAUDE FIX A3] eventuale blocco dal controllo lato database
+                        split_cloud_material(selected_db_id, children_inputs, auto_promote_rd=True)
+                    except ValueError as gate_err:
+                        st.error(str(gate_err))
+                    else:
+                        st.success("Coil successfully split and pushed to R&D!")
+                        st.cache_data.clear()
+                        st.rerun()
 
     with tabs[1]:
         st.markdown(" ✏️ Edit Selected Batch Values")
@@ -164,11 +172,19 @@ def open_coil_management_dialog(grade, thick, length, group_rows):
         st.markdown("#### 🗑 Delete or Move Batch")
         col_m1, col_m2 = st.columns(2)
         with col_m1:
-            if st.button(" Move to R&D", key=f"modal_rnd_{selected_db_id}", use_container_width=True):
-                promote_cloud_material(selected_db_id)
-                st.success("Moved to R&D!")
-                st.cache_data.clear()
-                st.rerun()
+            # [CLAUDE FIX A3] "Move to R&D" solo per coil verificati
+            move_ok, move_msg = _rd_gate(selected_row.get("quality_status"))
+            if st.button(" Move to R&D", key=f"modal_rnd_{selected_db_id}", use_container_width=True, disabled=not move_ok):
+                try:
+                    promote_cloud_material(selected_db_id)
+                except ValueError as gate_err:
+                    st.error(str(gate_err))
+                else:
+                    st.success("Moved to R&D!")
+                    st.cache_data.clear()
+                    st.rerun()
+            if not move_ok:
+                st.caption(move_msg)
         with col_m2:
             if st.button("🗑 Delete Batch", key=f"modal_del_{selected_db_id}", use_container_width=True):
                 delete_cloud_material(selected_db_id)
@@ -495,6 +511,25 @@ def insert_cloud_material(
         )
         s.commit()
 
+# [CLAUDE FIX A3] -------------------------------------------------------------------------------------------------
+# REGOLA (decisione utente): possono essere tagliati (split) o portati in R&D SOLO i coil verificati in laboratorio:
+#   - "Verified ✅"                       -> prove conformi al certificato
+#   - "Conditionally Verified ✅⚠️"       -> prove sotto il certificato ma entro la tolleranza
+# Bloccati: coil non ancora verificati (Standby / stato vuoto) e coil "Non-Compliant / Rejected ❌".
+# Il controllo è fatto sia nell'interfaccia (pulsanti disattivati + messaggio) sia nelle funzioni che scrivono nel
+# database (split_cloud_material / promote_cloud_material), così non può essere aggirato.
+def _rd_gate(quality_status):
+    """Restituisce (consentito: bool, messaggio: str) per split / passaggio in R&D."""
+    s = str(quality_status or "").strip()
+    if ("Non-Compliant" in s) or ("Rejected" in s) or ("❌" in s):
+        return False, "❌ Coil NON CONFORME: non può essere tagliato né portato in R&D."
+    if "Verified" in s:
+        return True, ""
+    return False, ("🔒 Coil non ancora verificato: esegui prima le prove di trazione nella sezione "
+                   "'Quality Verification Hub'. In R&D possono andare solo i coil 'Verified ✅' o "
+                   "'Conditionally Verified ✅⚠️' (entro tolleranza).")
+# [END CLAUDE FIX A3] ---------------------------------------------------------------------------------------------
+
 def split_cloud_material(parent_id, children_list, auto_promote_rd=True):
     """Splits a parent coil into a dynamic number of child coils and zeros out the parent stock."""
     with conn.session as s:
@@ -505,6 +540,11 @@ def split_cloud_material(parent_id, children_list, auto_promote_rd=True):
         
         if not parent_res:
             raise Exception("Parent material not found.")
+
+        # [CLAUDE FIX A3] blocco lato database: split solo per coil verificati (vedi _rd_gate)
+        gate_ok, gate_msg = _rd_gate(parent_res.get("quality_status"))
+        if not gate_ok:
+            raise ValueError(gate_msg)
 
         parent_lotto = parent_res['lotto_number'] if parent_res['lotto_number'] else parent_res['lotto_figlio']
         
@@ -629,6 +669,11 @@ def log_material_consumption(material_id, weight_used_kg, length_used_mm, notes=
 def promote_cloud_material(material_id):
     """Marks batch as promoted while keeping it visible in Production Hub."""
     with conn.session as s:
+        # [CLAUDE FIX A3] blocco lato database: in R&D solo coil verificati (vedi _rd_gate)
+        q_stat = s.execute(text('SELECT quality_status FROM materials WHERE id = :id'), {"id": int(material_id)}).scalar()
+        gate_ok, gate_msg = _rd_gate(q_stat)
+        if not gate_ok:
+            raise ValueError(gate_msg)
         s.execute(text('UPDATE materials SET is_promoted = 1 WHERE id = :id'), {"id": int(material_id)})
         s.commit()
 
@@ -2117,11 +2162,19 @@ elif st.session_state.current_page == "PROD_HUB":
                     if is_already_promoted:
                         st.info("Already in R&D")
                     else:
-                        if st.button(" Move to R&D", use_container_width=True):
-                            promote_cloud_material(selected_prod_id)
-                            st.success("Batch promoted to R&D!")
-                            st.cache_data.clear()
-                            st.rerun()          
+                        # [CLAUDE FIX A3] "Move to R&D" solo per coil verificati
+                        move_ok, move_msg = _rd_gate(selected_row.get("quality_status"))
+                        if st.button(" Move to R&D", use_container_width=True, disabled=not move_ok):
+                            try:
+                                promote_cloud_material(selected_prod_id)
+                            except ValueError as gate_err:
+                                st.error(str(gate_err))
+                            else:
+                                st.success("Batch promoted to R&D!")
+                                st.cache_data.clear()
+                                st.rerun()
+                        if not move_ok:
+                            st.caption(move_msg)
                 with act_col2:
                     if "confirm_delete_id" not in st.session_state:
                         st.session_state.confirm_delete_id = None
@@ -2199,6 +2252,10 @@ elif st.session_state.current_page == "PROD_HUB":
                     base_lotto = selected_row.get('lotto_figlio') if pd.notna(selected_row.get('lotto_figlio')) else selected_row.get('lotto_number', '')
                     
                     st.write(f"Available to split: **{current_w_tons:.3f} TON** / Width **{current_l:.2f} mm**")   # [CLAUDE FIX W1]
+                    # [CLAUDE FIX A3] split consentito solo per coil verificati
+                    split_ok, split_msg = _rd_gate(selected_row.get("quality_status"))
+                    if not split_ok:
+                        st.warning(split_msg)
                     
                     num_children = st.number_input("Number of Components", min_value=2, max_value=10, value=2, step=1)
                     
@@ -2223,10 +2280,12 @@ elif st.session_state.current_page == "PROD_HUB":
                             children_inputs.append({"lotto": c_lotto, "weight": c_weight_kg, "length": c_length})
                             st.write("---")
                             
-                        if st.form_submit_button("Confirm Split & Close Parent", use_container_width=True):
+                        if st.form_submit_button("Confirm Split & Close Parent", use_container_width=True, disabled=not split_ok):   # [CLAUDE FIX A3]
                             total_l = sum(c["length"] for c in children_inputs)
                             if total_l > current_l:
                                 st.error("Sum of child widths exceeds parent coil width!")   # [CLAUDE FIX W1]
+                            elif not _rd_gate(selected_row.get("quality_status"))[0]:   # [CLAUDE FIX A3] doppio controllo
+                                st.error(split_msg)
                             else:
                                 split_cloud_material(selected_prod_id, children_inputs, auto_promote_rd=True)
                                 for idx in range(int(num_children)):
