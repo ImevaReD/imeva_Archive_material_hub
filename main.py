@@ -535,7 +535,8 @@ def _rd_gate(quality_status):
 # calcolo, nei messaggi a video e salvate con le prove (lab_tensile_json). Prima il codice usava 30 MPa / 7 % mentre
 # i testi a video indicavano 10 MPa / 5 %.
 #   - snervamento e resistenza: media prove >= valore certificato - 10 MPa
-#   - allungamento:            media prove >= valore certificato - 5 punti percentuali (es. 25 % -> minimo 20 %)
+#   - allungamento:            media prove >= valore certificato - 5 % DEL VALORE (es. 25 % -> minimo 23,75 %)
+#     [CLAUDE FIX B1b] correzione su indicazione utente: prima veniva sottratto 5 punti percentuali (25 % -> 20 %)
 QV_STRESS_ALLOWANCE_MPA = 10.0
 QV_ELONG_ALLOWANCE_PCT = 5.0
 # [END CLAUDE FIX B1] ---------------------------------------------------------------------------------------------
@@ -1899,7 +1900,8 @@ elif st.session_state.current_page == "PROD_HUB":
     with st.container(border=True):
         st.markdown(" Quality Verification Hub (Tensile Testing)")
         # [CLAUDE FIX B1] testo generato dalle costanti di tolleranza (non più scritto a mano)
-        st.caption(f" *Input 3 tensile test measurements. Fields start blank. Includes a professional {QV_STRESS_ALLOWANCE_MPA:.0f} MPa / {QV_ELONG_ALLOWANCE_PCT:.0f}% industrial engineering allowance buffer.*")
+        # [CLAUDE FIX B1b] il 5 % dell'allungamento è relativo al valore di certificato
+        st.caption(f" *Input 3 tensile test measurements. Fields start blank. Includes a professional {QV_STRESS_ALLOWANCE_MPA:.0f} MPa (yield / UTS) / {QV_ELONG_ALLOWANCE_PCT:.0f}% of the certificate elongation industrial engineering allowance buffer.*")
 
         if not prod_df.empty:
             qv_col1, qv_col2 = st.columns([1, 1.5], gap="large")
@@ -1990,7 +1992,7 @@ elif st.session_state.current_page == "PROD_HUB":
 
                             effective_ref_y = ref_y - stress_allowance_mpa
                             effective_ref_u = ref_u - stress_allowance_mpa
-                            effective_ref_e = ref_e - elong_allowance_pct
+                            effective_ref_e = ref_e * (1.0 - elong_allowance_pct / 100.0)   # [CLAUDE FIX B1b] 5 % del valore (prima: ref_e - 5 punti)
 
                             averages_txt = f"Medie: σ_yield {avg_y:.1f} MPa | σ_uts {avg_u:.1f} MPa | A {avg_e:.1f} %"
                             if avg_y >= ref_y and avg_u >= ref_u and avg_e >= ref_e:
@@ -1998,7 +2000,7 @@ elif st.session_state.current_page == "PROD_HUB":
                                 result_kind, result_msg = "success", f"✅ **Fully Verified (Passed)** — Averages meet standard requirements! {averages_txt}"
                             elif avg_y >= effective_ref_y and avg_u >= effective_ref_u and avg_e >= effective_ref_e:
                                 new_status_val = "Conditionally Verified ✅⚠️"
-                                result_kind, result_msg = "info", f"⚠️ **Conditionally Verified (Within Allowance)** — Averages are slightly below standard targets but within the acceptable {stress_allowance_mpa:.0f} MPa / {elong_allowance_pct:.1f}% engineering tolerance buffer. {averages_txt}"   # [CLAUDE FIX B1] valori dalle costanti
+                                result_kind, result_msg = "info", f"⚠️ **Conditionally Verified (Within Allowance)** — Averages are slightly below standard targets but within the acceptable {stress_allowance_mpa:.0f} MPa / {elong_allowance_pct:.0f}% of certificate elongation (min {effective_ref_e:.2f} %) engineering tolerance buffer. {averages_txt}"   # [CLAUDE FIX B1] valori dalle costanti
                             else:
                                 new_status_val = "Non-Compliant / Rejected ❌"
                                 result_kind, result_msg = "error", f"❌ **Non-Compliant / Rejected (Failed)** — Averages exceed the allowable engineering tolerance limits. {averages_txt}"
@@ -2014,7 +2016,8 @@ elif st.session_state.current_page == "PROD_HUB":
                                 ],
                                 "avg": {"yield_mpa": round(avg_y, 2), "uts_mpa": round(avg_u, 2), "elong_pct": round(avg_e, 2)},
                                 "cert_ref": {"yield_mpa": ref_y, "uts_mpa": ref_u, "elong_pct": ref_e},
-                                "allowance": {"stress_mpa": stress_allowance_mpa, "elong_pct": elong_allowance_pct},
+                                "allowance": {"stress_mpa": stress_allowance_mpa, "elong_pct": elong_allowance_pct,
+                                              "elong_mode": "relative", "elong_min_pct": round(effective_ref_e, 2)},   # [CLAUDE FIX B1b]
                                 "result": new_status_val,
                                 "date": time.strftime("%Y-%m-%d %H:%M"),
                             }
