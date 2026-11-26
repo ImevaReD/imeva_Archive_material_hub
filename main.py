@@ -1922,12 +1922,25 @@ elif st.session_state.current_page == "PROD_HUB":
                 selected_qv_id = qv_options[selected_qv_label]
                 
                 qv_row = prod_df[prod_df['id'] == selected_qv_id].iloc[0]
+                # [CLAUDE FIX B2] -------------------------------------------------------------------------------------
+                # Decisione utente: la verifica confronta le prove SOLO con i valori del CERTIFICATO del fornitore.
+                # Prima il riquadro diceva "Certificate & EN10025 Reference Targets" e "Min ...", ma il calcolo usava
+                # già i valori del certificato (get_en10025_limits non è mai stata usata nella verifica).
+                # Ora il riquadro mostra i valori del certificato e le soglie minime effettive (con tolleranza B1).
+                _cy = _safe_num(qv_row.get('yield_mpa'))
+                _cu = _safe_num(qv_row.get('uts_mpa'))
+                _ce = _safe_num(qv_row.get('elongation_pct'))
                 st.info(f"""
-                **📋 Certificate & EN10025 Reference Targets:**
-                - **Min Yield ($\sigma_{{yield}}$):** **{qv_row.get('yield_mpa', 0.0)} MPa**
-                - **Min UTS ($\sigma_{{uts}}$):** **{qv_row.get('uts_mpa', 0.0)} MPa**
-                - **Min Elongation:** **{qv_row.get('elongation_pct', 0.0)} %**
+                **📋 Supplier Certificate Reference Values (verification basis):**
+                - **Yield ($\sigma_{{yield}}$):** **{_cy:.1f} MPa** → min. accepted with tolerance: {f'{_cy - QV_STRESS_ALLOWANCE_MPA:.1f} MPa' if _cy > 0 else 'n/d'}
+                - **UTS ($\sigma_{{uts}}$):** **{_cu:.1f} MPa** → min. accepted with tolerance: {f'{_cu - QV_STRESS_ALLOWANCE_MPA:.1f} MPa' if _cu > 0 else 'n/d'}
+                - **Elongation:** **{_ce:.1f} %** → min. accepted with tolerance: {f'{_ce * (1.0 - QV_ELONG_ALLOWANCE_PCT / 100.0):.2f} %' if _ce > 0 else 'n/d'}
                 """)
+                cert_values_ok = (_cy > 0 and _cu > 0 and _ce > 0)   # [CLAUDE FIX B2] senza certificato niente verifica
+                if not cert_values_ok:
+                    st.warning("⚠️ Valori del certificato mancanti o pari a 0: inseriscili con 'Edit Selected Batch Values'. "
+                               "Senza i valori del certificato la verifica non può essere eseguita.")
+                # [END CLAUDE FIX B2] ---------------------------------------------------------------------------------
             with qv_col2:
                 st.markdown("#### 📊 Enter 3 Tensile Test Samples")
                 # [CLAUDE FIX A5] esito dell'ultima valutazione (mostrato una sola volta dopo il salvataggio)
@@ -1968,6 +1981,8 @@ elif st.session_state.current_page == "PROD_HUB":
                         inputs_list = [t1_y, t2_y, t3_y, t1_u, t2_u, t3_u, t1_e, t2_e, t3_e]
                         if any(val is None for val in inputs_list):
                             st.warning(" Please fill in all 9 tensile test input fields before evaluating.")
+                        elif not cert_values_ok:   # [CLAUDE FIX B2] confronto impossibile senza valori di certificato
+                            st.error("❌ Verifica non eseguita: mancano i valori del certificato (Yield / UTS / Elongation) per questo coil.")
                         else:
                             # [CLAUDE FIX A5] -------------------------------------------------------------------------
                             # PROBLEMA: il calcolo delle tolleranze, la valutazione e il salvataggio erano FUORI da
@@ -1997,13 +2012,13 @@ elif st.session_state.current_page == "PROD_HUB":
                             averages_txt = f"Medie: σ_yield {avg_y:.1f} MPa | σ_uts {avg_u:.1f} MPa | A {avg_e:.1f} %"
                             if avg_y >= ref_y and avg_u >= ref_u and avg_e >= ref_e:
                                 new_status_val = "Verified ✅"
-                                result_kind, result_msg = "success", f"✅ **Fully Verified (Passed)** — Averages meet standard requirements! {averages_txt}"
+                                result_kind, result_msg = "success", f"✅ **Fully Verified (Passed)** — Averages meet the supplier certificate values! {averages_txt}"   # [CLAUDE FIX B2] riferimento = certificato
                             elif avg_y >= effective_ref_y and avg_u >= effective_ref_u and avg_e >= effective_ref_e:
                                 new_status_val = "Conditionally Verified ✅⚠️"
-                                result_kind, result_msg = "info", f"⚠️ **Conditionally Verified (Within Allowance)** — Averages are slightly below standard targets but within the acceptable {stress_allowance_mpa:.0f} MPa / {elong_allowance_pct:.0f}% of certificate elongation (min {effective_ref_e:.2f} %) engineering tolerance buffer. {averages_txt}"   # [CLAUDE FIX B1] valori dalle costanti
+                                result_kind, result_msg = "info", f"⚠️ **Conditionally Verified (Within Allowance)** — Averages are slightly below the supplier certificate values but within the acceptable {stress_allowance_mpa:.0f} MPa / {elong_allowance_pct:.0f}% of certificate elongation (min {effective_ref_e:.2f} %) engineering tolerance buffer. {averages_txt}"   # [CLAUDE FIX B1] valori dalle costanti
                             else:
                                 new_status_val = "Non-Compliant / Rejected ❌"
-                                result_kind, result_msg = "error", f"❌ **Non-Compliant / Rejected (Failed)** — Averages exceed the allowable engineering tolerance limits. {averages_txt}"
+                                result_kind, result_msg = "error", f"❌ **Non-Compliant / Rejected (Failed)** — Averages are below the supplier certificate values beyond the allowed tolerance. {averages_txt}"   # [CLAUDE FIX B2] testo chiarito
                             
                             # --- SAVE STATUS TO DATABASE INSTANTLY ---
                             # [CLAUDE FIX A6] Oltre allo stato vengono salvate le 3 prove, le medie, i riferimenti del
