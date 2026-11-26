@@ -477,6 +477,43 @@ def fetch_cloud_materials(hub_section="PROD", family='METALS'):
         """
         return conn.query(query, params={"fam": family}, ttl=0)
 
+# [CLAUDE FIX B17] -----------------------------------------------------------------------------------------------
+# Controllo dei dati obbligatori di un NUOVO coil (Manual Form e import da file). Prima si poteva salvare un coil
+# senza grade, spessore, peso, larghezza o valori del certificato: il coil finiva senza gruppo nel Warehouse e la
+# verifica di laboratorio non poteva essere eseguita (B2). Restituisce la lista degli errori (vuota = dati validi).
+def _validate_new_coil(grade, thickness, yield_mpa, uts_mpa, elongation, lotto_padre, lotto_figlio, weight_tons, width_mm):
+    def _num(v):
+        try:
+            f = float(v)
+            return None if np.isnan(f) else f
+        except (TypeError, ValueError):
+            return None
+    def _txt(v):
+        t = "" if v is None else str(v).strip()
+        return "" if t.lower() in ("", "none", "nan", "unknown") else t
+
+    errors = []
+    if not _txt(grade):
+        errors.append("1. Material Grade obbligatorio")
+    checks = [
+        (thickness, "2. Thickness [mm]"), (yield_mpa, "3. Yield Stress [MPa] (certificato)"),
+        (uts_mpa, "4. Ultimate Stress [MPa] (certificato)"), (elongation, "5. Elongation [%] (certificato)"),
+        (weight_tons, "9. Coil Weight [TON]"), (width_mm, "10. Coil Width [mm]"),
+    ]
+    for val, label in checks:
+        f = _num(val)
+        if f is None or f <= 0:
+            errors.append(f"{label} obbligatorio e maggiore di 0")
+    if not _txt(lotto_padre) and not _txt(lotto_figlio):
+        errors.append("indicare almeno 6. Lotto Father o 7. Component Code")
+    y, u, e = _num(yield_mpa), _num(uts_mpa), _num(elongation)
+    if y and u and y > u:
+        errors.append("lo snervamento (Yield) non può essere maggiore della resistenza (UTS)")
+    if e and e > 100:
+        errors.append("5. Elongation deve essere una percentuale (≤ 100)")
+    return errors
+# [END CLAUDE FIX B17] -------------------------------------------------------------------------------------------
+
 def insert_cloud_material(
     grade, thickness, yield_mpa, uts_mpa, elongation, lotto_padre, lotto_figlio, provider, 
     family, cert_path=None, coil_weight=0.0, coil_length=0.0, coil_length_mm=None
@@ -1885,9 +1922,13 @@ elif st.session_state.current_page == "PROD_HUB":
                     with st.container():
                         st.markdown(card_html, unsafe_allow_html=True)
                         
+                        # [CLAUDE FIX B5] Il gruppo della card è grade + spessore + LARGHEZZA (vedi groupby sopra).
+                        # Prima il filtro usava solo grade + spessore: "Manage / Split Group" mostrava anche i coil di
+                        # altre card con larghezza diversa. Ora la finestra elenca solo i coil della card cliccata.
                         group_rows = temp_storage_df[
                             (temp_storage_df['grade'] == grade) & 
-                            (temp_storage_df['thickness'] == thick)
+                            (temp_storage_df['thickness'] == thick) &
+                            (temp_storage_df['calc_length_mm'] == length)
                         ]
                         
                         btn_key = f"manage_group_btn_{row_idx}_{col_idx}"
@@ -2337,7 +2378,11 @@ elif st.session_state.current_page == "PROD_HUB":
         entry_tab1, entry_tab2 = st.tabs(["Manual Form Entry", "📁 File Upload (.txt / .csv / .xlsx)"])
         
         with entry_tab1:
-            with st.form("prod_form_manual", clear_on_submit=True):
+            # [CLAUDE FIX B17] clear_on_submit disattivato: se i dati sono incompleti i valori inseriti restano nel form.
+            # Dopo un salvataggio riuscito il form viene svuotato cambiando la sua chiave (contatore "manual_form_ver").
+            if "manual_form_ver" not in st.session_state:
+                st.session_state.manual_form_ver = 0
+            with st.form(f"prod_form_manual_{st.session_state.manual_form_ver}", clear_on_submit=False):
                 ca, cb = st.columns(2)
                 with ca:
                     grade = st.text_input("1. Material Grade / Name", value="")
@@ -2356,30 +2401,37 @@ elif st.session_state.current_page == "PROD_HUB":
                 uploaded_cert = st.file_uploader("Upload Test Certificate (.pdf, .png, .jpg)", type=["pdf", "png", "jpg", "jpeg"])
                 
                 if st.form_submit_button("💾 Save Batch", use_container_width=True):
-                    cert_url = None
-                    active_lotto_label = lotto_padre if lotto_padre else (lotto_figlio if lotto_figlio else "batch")
-                    if uploaded_cert is not None:
-                        cert_url = upload_certificate_to_cloud(uploaded_cert, active_lotto_label)
+                    # [CLAUDE FIX B17] controllo campi obbligatori prima di salvare
+                    new_coil_errors = _validate_new_coil(grade, thickness, sig_yield, sig_fail, elongation,
+                                                         lotto_padre, lotto_figlio, coil_weight_tons, coil_length)
+                    if new_coil_errors:
+                        st.error("❌ Coil NON salvato. Correggi i dati:\n\n- " + "\n- ".join(new_coil_errors))
+                    else:   # [CLAUDE FIX B17] salvataggio solo se i dati sono completi
+                        cert_url = None
+                        active_lotto_label = lotto_padre if lotto_padre else (lotto_figlio if lotto_figlio else "batch")
+                        if uploaded_cert is not None:
+                            cert_url = upload_certificate_to_cloud(uploaded_cert, active_lotto_label)
 
-                    coil_weight_kg_val = (coil_weight_tons * 1000.0) if coil_weight_tons else 0.0
+                        coil_weight_kg_val = (coil_weight_tons * 1000.0) if coil_weight_tons else 0.0
 
-                    insert_cloud_material(
-                        grade, thickness, sig_yield, sig_fail, elongation, 
-                        lotto_padre=lotto_padre, lotto_figlio=lotto_figlio, provider=provider, 
-                        family=st.session_state.active_family,
-                        cert_path=cert_url,
-                        coil_weight=coil_weight_kg_val,
-                        coil_length_mm=coil_length
-                    )
-                    st.cache_data.clear()
-                    # [CLAUDE FIX C1] se il certificato era stato allegato ma l'upload è fallito, il coil è comunque
-                    # registrato: si mostra un avviso e NON si fa rerun (altrimenti l'errore sparirebbe subito).
-                    if uploaded_cert is not None and not cert_url:
-                        st.warning("⚠️ Coil registrato con stato 'Standby', ma il certificato NON è stato caricato (vedi errore sopra). "
-                                   "Puoi caricarlo dopo da 'Edit Selected Batch Values'.")
-                    else:
-                        st.toast("✅ Batch registered into Production database with 'Standby' status!")
-                        st.rerun()
+                        insert_cloud_material(
+                            grade, thickness, sig_yield, sig_fail, elongation, 
+                            lotto_padre=lotto_padre, lotto_figlio=lotto_figlio, provider=provider, 
+                            family=st.session_state.active_family,
+                            cert_path=cert_url,
+                            coil_weight=coil_weight_kg_val,
+                            coil_length_mm=coil_length
+                        )
+                        st.cache_data.clear()
+                        # [CLAUDE FIX C1] se il certificato era stato allegato ma l'upload è fallito, il coil è comunque
+                        # registrato: si mostra un avviso e NON si fa rerun (altrimenti l'errore sparirebbe subito).
+                        st.session_state.manual_form_ver += 1   # [CLAUDE FIX B17] svuota il form al prossimo caricamento
+                        if uploaded_cert is not None and not cert_url:
+                            st.warning("⚠️ Coil registrato con stato 'Standby', ma il certificato NON è stato caricato (vedi errore sopra). "
+                                       "Puoi caricarlo dopo da 'Edit Selected Batch Values'.")
+                        else:
+                            st.toast("✅ Batch registered into Production database with 'Standby' status!")
+                            st.rerun()
 
         with entry_tab2:
             if "file_uploader_key" not in st.session_state:
@@ -2415,6 +2467,7 @@ elif st.session_state.current_page == "PROD_HUB":
 
                     if st.button("Import Batches to Database", use_container_width=True):
                         success_count = 0
+                        skipped_rows = []   # [CLAUDE FIX B17] righe scartate per dati mancanti
                         for _, r in df_upload.iterrows():
                             try:
                                 def safe_float(val):
@@ -2434,6 +2487,13 @@ elif st.session_state.current_page == "PROD_HUB":
                                 provider = str(r.get("provider", ""))
                                 w_tons = safe_float(r.get("coil_weight_TON", 0.0))
                                 l_mm = safe_float(r.get("coil_length_mm", 0.0))   # [CLAUDE FIX W1] = larghezza coil [mm]
+
+                                # [CLAUDE FIX B17] stesse regole del Manual Form: le righe incomplete vengono saltate
+                                row_errors = _validate_new_coil(r.get("grade"), thickness, yield_val, uts_val, elong_val,
+                                                                lotto_num, lotto_son, w_tons, l_mm)
+                                if row_errors:
+                                    skipped_rows.append(f"Riga {int(_) + 1} (lotto {lotto_num or lotto_son or '-'}): " + "; ".join(row_errors))
+                                    continue
                                 
                                 insert_cloud_material(
                                     grade=grade, thickness=thickness, yield_mpa=yield_val, uts_mpa=uts_val, elongation=elong_val,
@@ -2445,10 +2505,14 @@ elif st.session_state.current_page == "PROD_HUB":
                             except Exception as ex:
                                 st.error(f"Error importing row: {ex}")
                         
+                        # [CLAUDE FIX B17] se ci sono righe scartate non si fa rerun, così l'elenco resta visibile
+                        if skipped_rows:
+                            st.warning(f"⚠️ {len(skipped_rows)} righe NON importate per dati mancanti o non validi:\n\n- " + "\n- ".join(skipped_rows))
                         if success_count > 0:
                             st.success(f"Successfully imported {success_count} batches!")
                             st.cache_data.clear()
-                            st.rerun()
+                            if not skipped_rows:
+                                st.rerun()
                 except Exception as e:
                     st.error(f"Error reading upload file: {e}")
 
