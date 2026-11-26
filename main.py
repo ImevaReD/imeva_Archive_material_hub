@@ -273,6 +273,46 @@ except Exception as e:
     st.error(f"IMEVA MATERIAL HUB ERROR: Failed to connect to Supabase Cloud Database: {e}")
     st.stop()
 
+# [CLAUDE FIX A6] -------------------------------------------------------------------------------------------------
+# Nuove colonne per salvare le 3 prove di trazione della "Quality Verification Hub" (prima veniva salvato solo lo stato).
+#   lab_tensile_json   -> JSON con le 3 prove (yield / uts / allungamento), medie, riferimenti, tolleranze ed esito
+#   lab_yield_avg_mpa  -> media snervamento [MPa]      lab_uts_avg_mpa -> media resistenza [MPa]
+#   lab_elong_avg_pct  -> media allungamento [%]       lab_test_date   -> data/ora della verifica
+# Le colonne vengono create automaticamente (una sola volta per avvio) se non esistono: ADD COLUMN IF NOT EXISTS
+# non modifica né cancella dati esistenti. Le stesse istruzioni sono in schema.sql.
+@st.cache_resource
+def ensure_lab_tensile_columns():
+    with conn.session as s:
+        s.execute(text("""
+            ALTER TABLE materials
+                ADD COLUMN IF NOT EXISTS lab_tensile_json JSONB,
+                ADD COLUMN IF NOT EXISTS lab_yield_avg_mpa NUMERIC,
+                ADD COLUMN IF NOT EXISTS lab_uts_avg_mpa NUMERIC,
+                ADD COLUMN IF NOT EXISTS lab_elong_avg_pct NUMERIC,
+                ADD COLUMN IF NOT EXISTS lab_test_date TIMESTAMPTZ;
+        """))
+        s.commit()
+    return True
+
+try:
+    ensure_lab_tensile_columns()
+except Exception as e:
+    st.error(f"IMEVA MATERIAL HUB ERROR: impossibile creare le colonne delle prove di trazione (eseguire schema.sql): {e}")
+    st.stop()
+
+
+def _lab_tests_from_json(raw):
+    """[CLAUDE FIX A6] Converte lab_tensile_json (dict o testo JSON) in dict; {} se vuoto o non valido."""
+    if raw is None or (isinstance(raw, float) and np.isnan(raw)):
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+# [END CLAUDE FIX A6] ---------------------------------------------------------------------------------------------
+
 def upload_certificate_to_cloud(uploaded_file, lotto_identifier):
     """Uploads a certificate file to the Supabase 'certificate_storage' bucket and returns its public URL."""
     if storage_client is None:   # [CLAUDE FIX C1b/C2] nessuna chiave Storage configurata
@@ -385,7 +425,8 @@ def fetch_cloud_materials(hub_section="PROD", family='METALS'):
                 rd_remaining_weight_kg, rd_remaining_length_mm, rd_notes, 
                 lotto_number, lotto_figlio, provider, 
                 certificate_url AS datasheet, 
-                is_promoted, codice, description, quantity, quality_status
+                is_promoted, codice, description, quantity, quality_status,
+                lab_yield_avg_mpa, lab_uts_avg_mpa, lab_elong_avg_pct, lab_test_date, lab_tensile_json   -- [CLAUDE FIX A6] prove di trazione
             FROM materials 
             WHERE (hub_section IN ('PROD', 'RD') OR hub_section IS NULL OR is_promoted = 1) AND family = :fam 
             ORDER BY id DESC;
@@ -412,7 +453,8 @@ def fetch_cloud_materials(hub_section="PROD", family='METALS'):
                 rd_remaining_weight_kg, rd_remaining_length_mm, rd_notes, 
                 lotto_number, lotto_figlio, provider, 
                 certificate_url AS datasheet, 
-                is_promoted, codice, description, quantity, quality_status
+                is_promoted, codice, description, quantity, quality_status,
+                lab_yield_avg_mpa, lab_uts_avg_mpa, lab_elong_avg_pct, lab_test_date, lab_tensile_json   -- [CLAUDE FIX A6] prove di trazione
             FROM materials 
             WHERE (hub_section = 'PROD' OR hub_section IS NULL) AND family = :fam 
             ORDER BY id DESC;
@@ -486,6 +528,8 @@ def split_cloud_material(parent_id, children_list, auto_promote_rd=True):
             "c_pct", "si_pct", "mn_pct", "p_pct", "s_pct", "cr_pct", "mo_pct", "ni_pct", "cu_pct", "al_pct",
             "as_pct", "nb_pct", "sn_pct", "ti_pct", "w_pct", "b_pct", "co_pct", "pb_pct", "v_pct", "zn_pct",
             "mg_pct", "ce_pct", "la_pct", "fe_pct",
+            # [CLAUDE FIX A6] prove di trazione della Quality Verification
+            "lab_tensile_json", "lab_yield_avg_mpa", "lab_uts_avg_mpa", "lab_elong_avg_pct", "lab_test_date",
         ]
         inherited_cols = [c for c in INHERITED_COLUMNS if c in parent_res.keys()]
         inherited_values = {}
@@ -1034,8 +1078,21 @@ elif st.session_state.current_page == "RD_DECK":
                 q_status = db_status
             
             lab_data = st.session_state.experimental_curves.get(mat_id, {})
-            lab_sy = f"{lab_data.get('sigy_MPa', 0.0):.0f}" if lab_data else "-"
-            lab_sf = f"{lab_data.get('uts_MPa', 0.0):.0f}" if lab_data else "-"
+            # [CLAUDE FIX A6] Valori di laboratorio mostrati in R&D:
+            #   1) medie delle 3 prove di trazione della Quality Verification (se presenti)
+            #   2) altrimenti risultati delle curve dog-bone CSV (come prima)
+            # Lettura con _safe_num: un valore mancante non manda più in errore la pagina (prima: TypeError su None).
+            lab_y = _safe_num(row.get('lab_yield_avg_mpa'), None)
+            lab_u = _safe_num(row.get('lab_uts_avg_mpa'), None)
+            lab_e = _safe_num(row.get('lab_elong_avg_pct'), None)
+            lab_source = "Prove di trazione (Quality Verification)" if lab_y is not None else None
+            if lab_y is None and lab_data:
+                lab_y = _safe_num(lab_data.get('sigy_MPa'), None)
+                lab_u = _safe_num(lab_data.get('uts_MPa'), None)
+                lab_e = _safe_num(lab_data.get('elongation_pct'), None)
+                lab_source = "Curve dog-bone (CSV)"
+            lab_sy = f"{lab_y:.0f}" if lab_y is not None else "-"
+            lab_sf = f"{lab_u:.0f}" if lab_u is not None else "-"
 
             display_label = (
                 f"{grade_str}-SP{thick_val:.1f}-{lotto_str} (ID #{seq_id}) "
@@ -1051,6 +1108,11 @@ elif st.session_state.current_page == "RD_DECK":
                 "cert_yield_MPa": cert_sy,
                 "cert_uts_MPa": cert_sf,
                 "cert_elong_pct": cert_el,          # [CLAUDE FIX A1b] allungamento da certificato
+                "lab_yield_MPa": lab_y,             # [CLAUDE FIX A6] valori di laboratorio (None se assenti)
+                "lab_uts_MPa": lab_u,
+                "lab_elong_pct": lab_e,
+                "lab_source": lab_source,
+                "lab_tensile": _lab_tests_from_json(row.get('lab_tensile_json')),
                 "lotto": lotto_str,
                 "coil_weight_kg": c_weight,
                 "coil_length_mm": c_length,
@@ -1163,14 +1225,12 @@ elif st.session_state.current_page == "RD_DECK":
             active_elong = metadata.get("cert_elong_pct", 0)      # [CLAUDE FIX A1b] prima: "elongation_pct" (chiave inesistente -> 0)
             cert_match = True
         elif cert_status_filter == "Laboratory":
-            session_data = st.session_state.experimental_curves.get(mat_id, {})
-            active_yield = session_data.get("sigy_MPa", metadata.get("sigy_MPa", 0))
-            active_uts = session_data.get("uts_MPa", metadata.get("uts_MPa", 0))
-            active_elong = session_data.get("elongation_pct", session_data.get("elongation", metadata.get("elongation_pct", 0)))
-            
-            has_metadata_lab = metadata.get("sigy_MPa") is not None
-            has_session_lab = mat_id in st.session_state.experimental_curves
-            cert_match = bool(has_metadata_lab or has_session_lab)
+            # [CLAUDE FIX A6] usa i valori di laboratorio calcolati sopra (prove di trazione o dog-bone);
+            # sono mostrati solo i coil che hanno almeno un risultato di laboratorio.
+            active_yield = metadata.get("lab_yield_MPa") or 0.0
+            active_uts = metadata.get("lab_uts_MPa") or 0.0
+            active_elong = metadata.get("lab_elong_pct") or 0.0
+            cert_match = metadata.get("lab_yield_MPa") is not None
         else: 
             active_yield = metadata.get("sigy_MPa", metadata.get("cert_yield_MPa", 0))
             active_uts = metadata.get("uts_MPa", metadata.get("cert_uts_MPa", 0))
@@ -1331,6 +1391,20 @@ elif st.session_state.current_page == "RD_DECK":
             st.write(f"**Lotto :** {mat_info.get('lotto') or 'N/A'}")
             st.write(f"**Yield Stress ($R_e$):** {mat_info['cert_yield_MPa']} MPa")
             st.write(f"**Tensile Stress ($R_m$):** {mat_info['cert_uts_MPa']} MPa")
+
+            # [CLAUDE FIX A6] prove di trazione salvate dalla Quality Verification (ereditate dal padre se coil figlio)
+            st.markdown("---")
+            st.subheader("🧪 Laboratory Tensile Tests")
+            _lab = mat_info.get("lab_tensile") or {}
+            if _lab.get("tests"):
+                _rows = [{"Prova": f"Test {i+1}", "Yield [MPa]": t.get("yield_mpa"), "UTS [MPa]": t.get("uts_mpa"), "A [%]": t.get("elong_pct")}
+                         for i, t in enumerate(_lab["tests"])]
+                _avg = _lab.get("avg", {})
+                _rows.append({"Prova": "Media", "Yield [MPa]": _avg.get("yield_mpa"), "UTS [MPa]": _avg.get("uts_mpa"), "A [%]": _avg.get("elong_pct")})
+                st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
+                st.caption(f"Esito: {_lab.get('result', '-')} | Data verifica: {_lab.get('date', '-')}")
+            else:
+                st.info("Nessuna prova di trazione salvata per questo coil (Production Hub → Quality Verification Hub).")
 
             st.markdown("---")
             st.subheader("Log Material Usage")
@@ -1802,6 +1876,16 @@ elif st.session_state.current_page == "PROD_HUB":
                 _qv_last = st.session_state.pop("qv_last_result", None)
                 if _qv_last and _qv_last[0] == int(selected_qv_id):
                     {"success": st.success, "info": st.info, "error": st.error}[_qv_last[1]](_qv_last[2])
+                # [CLAUDE FIX A6] prove di trazione già salvate per il coil selezionato
+                _saved_lab = _lab_tests_from_json(qv_row.get("lab_tensile_json"))
+                if _saved_lab.get("tests"):
+                    with st.expander(f"🧪 Ultima verifica salvata ({_saved_lab.get('date', '-')}) — {_saved_lab.get('result', '')}", expanded=False):
+                        _rows = [{"Prova": f"Test {i+1}", "Yield [MPa]": t.get("yield_mpa"), "UTS [MPa]": t.get("uts_mpa"), "A [%]": t.get("elong_pct")}
+                                 for i, t in enumerate(_saved_lab["tests"])]
+                        _avg = _saved_lab.get("avg", {})
+                        _rows.append({"Prova": "Media", "Yield [MPa]": _avg.get("yield_mpa"), "UTS [MPa]": _avg.get("uts_mpa"), "A [%]": _avg.get("elong_pct")})
+                        st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
+                        st.caption("Compilando di nuovo il form, questa verifica viene sostituita.")
                 with st.form(key=f"quality_verification_form_{selected_qv_id}"):
                     st.markdown("**1. Yield Stress ($\sigma_{yield}$ - MPa)**")
                     y1, y2, y3 = st.columns(3)
@@ -1857,17 +1941,44 @@ elif st.session_state.current_page == "PROD_HUB":
                                 new_status_val = "Verified ✅"
                                 result_kind, result_msg = "success", f"✅ **Fully Verified (Passed)** — Averages meet standard requirements! {averages_txt}"
                             elif avg_y >= effective_ref_y and avg_u >= effective_ref_u and avg_e >= effective_ref_e:
-                                new_status_val = "Verified ✅"
+                                new_status_val = "Conditionally Verified ✅⚠️"
                                 result_kind, result_msg = "info", f"⚠️ **Conditionally Verified (Within Allowance)** — Averages are slightly below standard targets but within the acceptable 10 MPa / 5.0% engineering tolerance buffer. {averages_txt}"
                             else:
                                 new_status_val = "Non-Compliant / Rejected ❌"
                                 result_kind, result_msg = "error", f"❌ **Non-Compliant / Rejected (Failed)** — Averages exceed the allowable engineering tolerance limits. {averages_txt}"
                             
                             # --- SAVE STATUS TO DATABASE INSTANTLY ---
+                            # [CLAUDE FIX A6] Oltre allo stato vengono salvate le 3 prove, le medie, i riferimenti del
+                            # certificato, le tolleranze usate e la data della verifica (prima venivano perse).
+                            lab_tests_payload = {
+                                "tests": [
+                                    {"yield_mpa": float(t1_y), "uts_mpa": float(t1_u), "elong_pct": float(t1_e)},
+                                    {"yield_mpa": float(t2_y), "uts_mpa": float(t2_u), "elong_pct": float(t2_e)},
+                                    {"yield_mpa": float(t3_y), "uts_mpa": float(t3_u), "elong_pct": float(t3_e)},
+                                ],
+                                "avg": {"yield_mpa": round(avg_y, 2), "uts_mpa": round(avg_u, 2), "elong_pct": round(avg_e, 2)},
+                                "cert_ref": {"yield_mpa": ref_y, "uts_mpa": ref_u, "elong_pct": ref_e},
+                                "allowance": {"stress_mpa": stress_allowance_mpa, "elong_pct": elong_allowance_pct},
+                                "result": new_status_val,
+                                "date": time.strftime("%Y-%m-%d %H:%M"),
+                            }
                             with conn.session as s:
                                 s.execute(
-                                    text("UPDATE materials SET quality_status = :qstat WHERE id = :id"),
-                                    {"qstat": new_status_val, "id": int(selected_qv_id)}
+                                    text("""
+                                        UPDATE materials SET
+                                            quality_status = :qstat,
+                                            lab_tensile_json = CAST(:lab_json AS JSONB),
+                                            lab_yield_avg_mpa = :avg_y,
+                                            lab_uts_avg_mpa = :avg_u,
+                                            lab_elong_avg_pct = :avg_e,
+                                            lab_test_date = NOW()
+                                        WHERE id = :id
+                                    """),
+                                    {
+                                        "qstat": new_status_val, "lab_json": json.dumps(lab_tests_payload),
+                                        "avg_y": float(avg_y), "avg_u": float(avg_u), "avg_e": float(avg_e),
+                                        "id": int(selected_qv_id)
+                                    }
                                 )
                                 s.commit()
                             
