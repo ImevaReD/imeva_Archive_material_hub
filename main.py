@@ -530,6 +530,16 @@ def _rd_gate(quality_status):
                    "'Conditionally Verified ✅⚠️' (entro tolleranza).")
 # [END CLAUDE FIX A3] ---------------------------------------------------------------------------------------------
 
+# [CLAUDE FIX B1] -------------------------------------------------------------------------------------------------
+# Tolleranze della Quality Verification (decisione utente: 10 MPa e 5 %). Unico punto di definizione: usate nel
+# calcolo, nei messaggi a video e salvate con le prove (lab_tensile_json). Prima il codice usava 30 MPa / 7 % mentre
+# i testi a video indicavano 10 MPa / 5 %.
+#   - snervamento e resistenza: media prove >= valore certificato - 10 MPa
+#   - allungamento:            media prove >= valore certificato - 5 punti percentuali (es. 25 % -> minimo 20 %)
+QV_STRESS_ALLOWANCE_MPA = 10.0
+QV_ELONG_ALLOWANCE_PCT = 5.0
+# [END CLAUDE FIX B1] ---------------------------------------------------------------------------------------------
+
 def split_cloud_material(parent_id, children_list, auto_promote_rd=True):
     """Splits a parent coil into a dynamic number of child coils and zeros out the parent stock."""
     with conn.session as s:
@@ -1888,7 +1898,8 @@ elif st.session_state.current_page == "PROD_HUB":
     st.write("---")
     with st.container(border=True):
         st.markdown(" Quality Verification Hub (Tensile Testing)")
-        st.caption(" *Input 3 tensile test measurements. Fields start blank. Includes a professional 10 MPa / 5% industrial engineering allowance buffer.*")
+        # [CLAUDE FIX B1] testo generato dalle costanti di tolleranza (non più scritto a mano)
+        st.caption(f" *Input 3 tensile test measurements. Fields start blank. Includes a professional {QV_STRESS_ALLOWANCE_MPA:.0f} MPa / {QV_ELONG_ALLOWANCE_PCT:.0f}% industrial engineering allowance buffer.*")
 
         if not prod_df.empty:
             qv_col1, qv_col2 = st.columns([1, 1.5], gap="large")
@@ -1973,9 +1984,9 @@ elif st.session_state.current_page == "PROD_HUB":
                             ref_e = _safe_num(qv_row.get('elongation_pct'))
                         
                             #EZIO  tensile testing values 
-                            # [CLAUDE NOTE B1] valori di tolleranza da confermare (il testo a video indica 10 MPa / 5 %)
-                            stress_allowance_mpa = 30.0
-                            elong_allowance_pct = 7.0
+                            # [CLAUDE FIX B1] prima 30.0 MPa / 7.0 % -> ora costanti QV_* (10 MPa / 5 %)
+                            stress_allowance_mpa = QV_STRESS_ALLOWANCE_MPA
+                            elong_allowance_pct = QV_ELONG_ALLOWANCE_PCT
 
                             effective_ref_y = ref_y - stress_allowance_mpa
                             effective_ref_u = ref_u - stress_allowance_mpa
@@ -1987,7 +1998,7 @@ elif st.session_state.current_page == "PROD_HUB":
                                 result_kind, result_msg = "success", f"✅ **Fully Verified (Passed)** — Averages meet standard requirements! {averages_txt}"
                             elif avg_y >= effective_ref_y and avg_u >= effective_ref_u and avg_e >= effective_ref_e:
                                 new_status_val = "Conditionally Verified ✅⚠️"
-                                result_kind, result_msg = "info", f"⚠️ **Conditionally Verified (Within Allowance)** — Averages are slightly below standard targets but within the acceptable 10 MPa / 5.0% engineering tolerance buffer. {averages_txt}"
+                                result_kind, result_msg = "info", f"⚠️ **Conditionally Verified (Within Allowance)** — Averages are slightly below standard targets but within the acceptable {stress_allowance_mpa:.0f} MPa / {elong_allowance_pct:.1f}% engineering tolerance buffer. {averages_txt}"   # [CLAUDE FIX B1] valori dalle costanti
                             else:
                                 new_status_val = "Non-Compliant / Rejected ❌"
                                 result_kind, result_msg = "error", f"❌ **Non-Compliant / Rejected (Failed)** — Averages exceed the allowable engineering tolerance limits. {averages_txt}"
