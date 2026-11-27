@@ -329,6 +329,45 @@ def _lab_tests_from_json(raw):
         return {}
 # [END CLAUDE FIX A6] ---------------------------------------------------------------------------------------------
 
+# [CLAUDE FIX B13] -------------------------------------------------------------------------------------------------
+# Conversione dei dati salvati nel database (curve dog-bone e analisi chimica) nel formato usato dall'R&D Deck.
+# Usate per rileggere i dati dal database a ogni apertura dell'R&D Deck (prima venivano letti solo all'avvio della
+# sessione: i dati caricati da un altro utente comparivano solo dopo il riavvio dell'app).
+def _json_obj(raw):
+    """dict da JSON (testo o dict); None se vuoto o non valido."""
+    if raw is None or (isinstance(raw, float) and np.isnan(raw)):
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        obj = json.loads(raw)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+def _curves_from_json(raw):
+    """Curve dog-bone salvate -> dizionario per st.session_state.experimental_curves (None se assenti)."""
+    d = _json_obj(raw)
+    if not d:
+        return None
+    arr = lambda k: np.array(d.get(k) or [])
+    return {
+        "strain": arr("strain"), "stress_MPa": arr("stress_MPa"),
+        "sigy_MPa": _safe_num(d.get("sigy_MPa")), "uts_MPa": _safe_num(d.get("uts_MPa")),
+        "E_GPa": _safe_num(d.get("E_GPa")), "elongation_pct": _safe_num(d.get("elongation_pct")),
+        "avg_strain": arr("avg_strain"), "avg_stress": arr("avg_stress"),
+        "eng_strain_clean": arr("eng_strain_clean"), "eng_stress_clean": arr("eng_stress_clean"),
+        "deck": d.get("deck") or "",
+    }
+
+def _chem_from_json(raw):
+    """Analisi spettrometro salvata -> {"df": DataFrame, "comp": dict} (None se assente)."""
+    d = _json_obj(raw)
+    if not d or not (d.get("df_records") or d.get("comp")):
+        return None
+    return {"df": pd.DataFrame(d.get("df_records") or []), "comp": d.get("comp") or {}}
+# [END CLAUDE FIX B13] ---------------------------------------------------------------------------------------------
+
 def upload_certificate_to_cloud(uploaded_file, lotto_identifier):
     """Uploads a certificate file to the Supabase 'certificate_storage' bucket and returns its public URL."""
     if storage_client is None:   # [CLAUDE FIX C1b/C2] nessuna chiave Storage configurata
@@ -373,6 +412,7 @@ def show_cert_modal(mat_name, cert_url, info):
 if "chemical_reports" not in st.session_state:
     st.session_state.chemical_reports = {}
 
+# [CLAUDE NOTE B13] caricamento iniziale mantenuto per compatibilità: l'R&D Deck ora rilegge comunque i dati dal DB
 if "reports_loaded_from_cloud" not in st.session_state:
     try:
         df_cloud_reports = conn.query("SELECT id, spectrometer_data_json FROM materials WHERE spectrometer_data_json IS NOT NULL;", ttl=0)
@@ -442,7 +482,8 @@ def fetch_cloud_materials(hub_section="PROD", family='METALS'):
                 lotto_number, lotto_figlio, provider, 
                 certificate_url AS datasheet, 
                 is_promoted, codice, description, quantity, quality_status,
-                lab_yield_avg_mpa, lab_uts_avg_mpa, lab_elong_avg_pct, lab_test_date, lab_tensile_json   -- [CLAUDE FIX A6] prove di trazione
+                lab_yield_avg_mpa, lab_uts_avg_mpa, lab_elong_avg_pct, lab_test_date, lab_tensile_json,   -- [CLAUDE FIX A6] prove di trazione
+                experimental_curves_json, spectrometer_data_json   -- [CLAUDE FIX B13] curve dog-bone e chimica lette dal DB
             FROM materials 
             WHERE (hub_section IN ('PROD', 'RD') OR hub_section IS NULL OR is_promoted = 1) AND family = :fam 
             ORDER BY id DESC;
@@ -965,6 +1006,7 @@ if "experimental_curves" not in st.session_state:
 if "chemical_reports" not in st.session_state:
     st.session_state.chemical_reports = {}
 ################################################################################
+# [CLAUDE NOTE B13] caricamento iniziale mantenuto per compatibilità: l'R&D Deck ora rilegge comunque i dati dal DB
 if "curves_loaded_from_cloud" not in st.session_state:
     try:
         df_cloud_curves = conn.query("SELECT id, experimental_curves_json FROM materials WHERE experimental_curves_json IS NOT NULL;", ttl=0)
@@ -1113,25 +1155,19 @@ elif st.session_state.current_page == "RD_DECK":
             mat_id = int(row['id'])
             seq_id = int(row['seq_id'])
             
-            if mat_id not in st.session_state.experimental_curves and pd.notna(row.get('experimental_curves_json')):
-                try:
-                    raw_mech = row['experimental_curves_json']
-                    mech_data = json.loads(raw_mech) if isinstance(raw_mech, str) else raw_mech
-                    st.session_state.experimental_curves[mat_id] = {
-                        "strain": np.array(mech_data.get("strain", [])),
-                        "stress_MPa": np.array(mech_data.get("stress_MPa", [])),
-                        "sigy_MPa": mech_data.get("sigy_MPa", 0.0),
-                        "uts_MPa": mech_data.get("uts_MPa", 0.0),
-                        "E_GPa": mech_data.get("E_GPa", 0.0),
-                        "elongation_pct": mech_data.get("elongation_pct", 0.0),
-                        "avg_strain": np.array(mech_data.get("avg_strain", [])),
-                        "avg_stress": np.array(mech_data.get("avg_stress", [])),
-                        "eng_strain_clean": np.array(mech_data.get("eng_strain_clean", [])),
-                        "eng_stress_clean": np.array(mech_data.get("eng_stress_clean", [])),
-                        "deck": mech_data.get("deck", "")
-                    }
-                except Exception:
-                    pass
+            # [CLAUDE FIX B13] Il database è la fonte dei dati: a ogni apertura dell'R&D Deck curve dog-bone e analisi
+            # chimica vengono rilette dalla riga del coil. Prima venivano caricate solo se assenti in sessione, quindi
+            # dati aggiunti/modificati da un altro utente (o in un'altra scheda) comparivano solo dopo il riavvio.
+            _curves = _curves_from_json(row.get('experimental_curves_json'))
+            if _curves:
+                st.session_state.experimental_curves[mat_id] = _curves
+            else:
+                st.session_state.experimental_curves.pop(mat_id, None)
+            _chem = _chem_from_json(row.get('spectrometer_data_json'))
+            if _chem:
+                st.session_state.chemical_reports[mat_id] = _chem
+            else:
+                st.session_state.chemical_reports.pop(mat_id, None)
 
             grade_str = str(row['grade'])
             thick_val = float(row['thickness'])
@@ -1576,109 +1612,118 @@ elif st.session_state.current_page == "RD_DECK":
 
             uploaded_spec = st.file_uploader("Upload Spectrometer Report (Excel/CSV)", type=["xlsx", "csv"], key=f"spec_{mat_id}")
         
-        if uploaded_spec is not None:
-            df_spec, comp_dict = parse_metal_power_excel(uploaded_spec)
-            if comp_dict is not None:
-                st.session_state.chemical_reports[mat_id] = {"df": df_spec, "comp": comp_dict}
+        with props_col:   # [CLAUDE FIX B14] blocco spostato nella colonna sinistra
+            # [CLAUDE FIX B14] ---------------------------------------------------------------------------------------
+            # 1) Prima il file rimasto nel campo di caricamento veniva rielaborato e RISALVATO nel database a ogni
+            #    interazione con la pagina (toast ripetuto, scritture inutili). Ora si salva una sola volta per file:
+            #    nome + dimensione del file già salvato sono memorizzati in sessione (spec_saved_sig_<id>).
+            # 2) Prima questo blocco era fuori dalla colonna sinistra (props_col) e veniva disegnato a tutta larghezza
+            #    sotto le colonne. Ora è dentro props_col, sotto il titolo "Chemical Composition Analysis".
+            spec_sig = (uploaded_spec.name, uploaded_spec.size) if uploaded_spec is not None else None
+            if uploaded_spec is not None and st.session_state.get(f"spec_saved_sig_{mat_id}") != spec_sig:
+                df_spec, comp_dict = parse_metal_power_excel(uploaded_spec)
+                if comp_dict is not None:
+                    st.session_state.chemical_reports[mat_id] = {"df": df_spec, "comp": comp_dict}
                 
-                temp_numeric = {
-                    k.replace(" (%)", ""): v for k, v in comp_dict.items() 
+                    temp_numeric = {
+                        k.replace(" (%)", ""): v for k, v in comp_dict.items() 
+                        if isinstance(v, (int, float)) and "Fe" not in k
+                    }
+                
+                    try:
+                        c_v = next((v for k, v in temp_numeric.items() if k.strip().upper() == "C"), 0.0)
+                        mn_v = next((v for k, v in temp_numeric.items() if k.strip().upper() == "MN"), 0.0)
+                        cr_v = next((v for k, v in temp_numeric.items() if k.strip().upper() == "CR"), 0.0)
+                        mo_v = next((v for k, v in temp_numeric.items() if k.strip().upper() == "MO"), 0.0)
+                        v_v = next((v for k, v in temp_numeric.items() if k.strip().upper() == "V"), 0.0)
+                        ni_v = next((v for k, v in temp_numeric.items() if k.strip().upper() == "NI"), 0.0)
+                        cu_v = next((v for k, v in temp_numeric.items() if k.strip().upper() == "CU"), 0.0)
+                        calc_cev = float(c_v) + float(mn_v)/6.0 + (float(cr_v)+float(mo_v)+float(v_v))/5.0 + (float(ni_v)+float(cu_v))/15.0
+                    except Exception:
+                        calc_cev = 0.0
+
+                    try:
+                        df_json_records = df_spec.to_dict(orient="records") if df_spec is not None else []
+                        spec_payload = json.dumps({"df_records": df_json_records, "comp": comp_dict})
+                    
+                        c_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "C"), 0.0)
+                        si_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "SI"), 0.0)
+                        mn_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "MN"), 0.0)
+                        p_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "P"), 0.0)
+                        s_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "S"), 0.0)
+                        cr_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "CR"), 0.0)
+                        mo_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "MO"), 0.0)
+                        ni_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "NI"), 0.0)
+                        cu_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "CU"), 0.0)
+                        al_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "AL"), 0.0)
+                        as_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "AS"), 0.0)
+                        nb_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "NB"), 0.0)
+                        sn_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "SN"), 0.0)
+                        ti_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "TI"), 0.0)
+                        w_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "W"), 0.0)
+                        b_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "B"), 0.0)
+                        co_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "CO"), 0.0)
+                        pb_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "PB"), 0.0)
+                        v_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "V"), 0.0)
+                        zn_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "ZN"), 0.0)
+                        mg_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "MG"), 0.0)
+                        ce_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "CE"), 0.0)
+                        la_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "LA"), 0.0)
+
+                        with conn.session as s:
+                            s.execute(
+                                text("""
+                                    UPDATE materials SET 
+                                        carbon_equivalent_cev = :cev,
+                                        c_pct = :c, si_pct = :si, mn_pct = :mn, p_pct = :p, s_pct = :s,
+                                        cr_pct = :cr, mo_pct = :mo, ni_pct = :ni, cu_pct = :cu, al_pct = :al,
+                                        as_pct = :as, nb_pct = :nb, sn_pct = :sn, ti_pct = :ti, w_pct = :w,
+                                        b_pct = :b, co_pct = :co, pb_pct = :pb, v_pct = :v, zn_pct = :zn,
+                                        mg_pct = :mg, ce_pct = :ce, la_pct = :la,
+                                        spectrometer_data_json = :spec_json
+                                    WHERE id = :id
+                                """),
+                                params={
+                                    "cev": float(calc_cev),
+                                    "c": float(c_val_db), "si": float(si_val_db), "mn": float(mn_val_db),
+                                    "p": float(p_val_db), "s": float(s_val_db), "cr": float(cr_val_db),
+                                    "mo": float(mo_val_db), "ni": float(ni_val_db), "cu": float(cu_val_db),
+                                    "al": float(al_val_db), "as": float(as_val_db), "nb": float(nb_val_db),
+                                    "sn": float(sn_val_db), "ti": float(ti_val_db), "w": float(w_val_db),
+                                    "b": float(b_val_db), "co": float(co_val_db), "pb": float(pb_val_db),
+                                    "v": float(v_val_db), "zn": float(zn_val_db), "mg": float(mg_val_db),
+                                    "ce": float(ce_val_db), "la": float(la_val_db),
+                                    "spec_json": spec_payload,
+                                    "id": int(mat_id)
+                                }
+                            )
+                            s.commit()
+                        st.toast("Spectrometer analysis saved to cloud via SQL!", icon="☁️")
+                        st.session_state[f"spec_saved_sig_{mat_id}"] = spec_sig   # [CLAUDE FIX B14] file già salvato
+                    except Exception as db_err:
+                        st.warning(f"Cloud sync error: {db_err}")
+        
+            if mat_id in st.session_state.chemical_reports:
+                saved_spec = st.session_state.chemical_reports[mat_id]
+                st.success("Spectrometer Data Loaded Successfully!")
+                st.dataframe(saved_spec["df"], use_container_width=True)
+            
+                numeric_comp = {
+                    k.replace(" (%)", ""): v for k, v in saved_spec["comp"].items() 
                     if isinstance(v, (int, float)) and "Fe" not in k
                 }
-                
-                try:
-                    c_v = next((v for k, v in temp_numeric.items() if k.strip().upper() == "C"), 0.0)
-                    mn_v = next((v for k, v in temp_numeric.items() if k.strip().upper() == "MN"), 0.0)
-                    cr_v = next((v for k, v in temp_numeric.items() if k.strip().upper() == "CR"), 0.0)
-                    mo_v = next((v for k, v in temp_numeric.items() if k.strip().upper() == "MO"), 0.0)
-                    v_v = next((v for k, v in temp_numeric.items() if k.strip().upper() == "V"), 0.0)
-                    ni_v = next((v for k, v in temp_numeric.items() if k.strip().upper() == "NI"), 0.0)
-                    cu_v = next((v for k, v in temp_numeric.items() if k.strip().upper() == "CU"), 0.0)
-                    calc_cev = float(c_v) + float(mn_v)/6.0 + (float(cr_v)+float(mo_v)+float(v_v))/5.0 + (float(ni_v)+float(cu_v))/15.0
-                except Exception:
-                    calc_cev = 0.0
-
-                try:
-                    df_json_records = df_spec.to_dict(orient="records") if df_spec is not None else []
-                    spec_payload = json.dumps({"df_records": df_json_records, "comp": comp_dict})
-                    
-                    c_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "C"), 0.0)
-                    si_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "SI"), 0.0)
-                    mn_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "MN"), 0.0)
-                    p_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "P"), 0.0)
-                    s_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "S"), 0.0)
-                    cr_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "CR"), 0.0)
-                    mo_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "MO"), 0.0)
-                    ni_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "NI"), 0.0)
-                    cu_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "CU"), 0.0)
-                    al_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "AL"), 0.0)
-                    as_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "AS"), 0.0)
-                    nb_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "NB"), 0.0)
-                    sn_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "SN"), 0.0)
-                    ti_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "TI"), 0.0)
-                    w_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "W"), 0.0)
-                    b_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "B"), 0.0)
-                    co_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "CO"), 0.0)
-                    pb_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "PB"), 0.0)
-                    v_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "V"), 0.0)
-                    zn_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "ZN"), 0.0)
-                    mg_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "MG"), 0.0)
-                    ce_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "CE"), 0.0)
-                    la_val_db = next((v for k, v in temp_numeric.items() if k.strip().upper() == "LA"), 0.0)
-
-                    with conn.session as s:
-                        s.execute(
-                            text("""
-                                UPDATE materials SET 
-                                    carbon_equivalent_cev = :cev,
-                                    c_pct = :c, si_pct = :si, mn_pct = :mn, p_pct = :p, s_pct = :s,
-                                    cr_pct = :cr, mo_pct = :mo, ni_pct = :ni, cu_pct = :cu, al_pct = :al,
-                                    as_pct = :as, nb_pct = :nb, sn_pct = :sn, ti_pct = :ti, w_pct = :w,
-                                    b_pct = :b, co_pct = :co, pb_pct = :pb, v_pct = :v, zn_pct = :zn,
-                                    mg_pct = :mg, ce_pct = :ce, la_pct = :la,
-                                    spectrometer_data_json = :spec_json
-                                WHERE id = :id
-                            """),
-                            params={
-                                "cev": float(calc_cev),
-                                "c": float(c_val_db), "si": float(si_val_db), "mn": float(mn_val_db),
-                                "p": float(p_val_db), "s": float(s_val_db), "cr": float(cr_val_db),
-                                "mo": float(mo_val_db), "ni": float(ni_val_db), "cu": float(cu_val_db),
-                                "al": float(al_val_db), "as": float(as_val_db), "nb": float(nb_val_db),
-                                "sn": float(sn_val_db), "ti": float(ti_val_db), "w": float(w_val_db),
-                                "b": float(b_val_db), "co": float(co_val_db), "pb": float(pb_val_db),
-                                "v": float(v_val_db), "zn": float(zn_val_db), "mg": float(mg_val_db),
-                                "ce": float(ce_val_db), "la": float(la_val_db),
-                                "spec_json": spec_payload,
-                                "id": int(mat_id)
-                            }
-                        )
-                        s.commit()
-                    st.toast("Spectrometer analysis saved to cloud via SQL!", icon="☁️")
-                except Exception as db_err:
-                    st.warning(f"Cloud sync error: {db_err}")
-        
-        if mat_id in st.session_state.chemical_reports:
-            saved_spec = st.session_state.chemical_reports[mat_id]
-            st.success("Spectrometer Data Loaded Successfully!")
-            st.dataframe(saved_spec["df"], use_container_width=True)
             
-            numeric_comp = {
-                k.replace(" (%)", ""): v for k, v in saved_spec["comp"].items() 
-                if isinstance(v, (int, float)) and "Fe" not in k
-            }
-            
-            if numeric_comp:
-                st.markdown("#### 📊 Alloy Elements Distribution (Excluding Base Iron)")
-                fig_chem, ax_chem = plt.subplots(figsize=(6, 3))
-                ax_chem.bar(list(numeric_comp.keys()), list(numeric_comp.values()), color="#28A745")
-                ax_chem.set_ylabel("Concentration [%]")
-                ax_chem.grid(axis="y", linestyle=":", alpha=0.7)
-                plt.xticks(rotation=45, ha="right")
-                fig_chem.tight_layout()
-                st.pyplot(fig_chem)
-        else:
-            st.info("No spectrometer report uploaded yet for this material.")
+                if numeric_comp:
+                    st.markdown("#### 📊 Alloy Elements Distribution (Excluding Base Iron)")
+                    fig_chem, ax_chem = plt.subplots(figsize=(6, 3))
+                    ax_chem.bar(list(numeric_comp.keys()), list(numeric_comp.values()), color="#28A745")
+                    ax_chem.set_ylabel("Concentration [%]")
+                    ax_chem.grid(axis="y", linestyle=":", alpha=0.7)
+                    plt.xticks(rotation=45, ha="right")
+                    fig_chem.tight_layout()
+                    st.pyplot(fig_chem)
+            else:
+                st.info("No spectrometer report uploaded yet for this material.")
 
         with action_col:
             st.subheader("Dog Bone Tensile Test CSV Processing")
