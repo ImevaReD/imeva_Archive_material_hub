@@ -748,21 +748,21 @@ def delete_cloud_material(material_id):
 
 def demote_cloud_material(material_id):
     """Un-promote batch so it returns to production and leaves R&D deck."""
+    # [CLAUDE FIX B12] -------------------------------------------------------------------------------------------
+    # Prima "Un-promote" cancellava anche i risultati delle curve dog-bone (experimental_curves_json e
+    # calculated_*), che andavano persi definitivamente. I dati di laboratorio appartengono al coil, non alla
+    # posizione: ora "Un-promote" cambia SOLO la posizione (torna in produzione) e conserva tutti i dati
+    # (curve dog-bone, prove di trazione, analisi chimica, stato qualità). Se il coil viene riportato in R&D li ritrova.
     with conn.session as s:
         s.execute(text('''
             UPDATE materials
             SET is_promoted = 0,
-                experimental_curves_json = NULL,
-                calculated_sigy_mpa = NULL,
-                calculated_uts_mpa = NULL,
-                calculated_e_gpa = NULL,
-                calculated_elongation_pct = NULL
+                hub_section = CASE WHEN hub_section = 'RD' THEN 'PROD' ELSE hub_section END
             WHERE id = :id
         '''), {"id": int(material_id)})
         s.commit()
-    if material_id in st.session_state.get("experimental_curves", {}):
-        del st.session_state.experimental_curves[material_id]
     st.cache_data.clear()
+    # [END CLAUDE FIX B12] ---------------------------------------------------------------------------------------
 
 def _safe_num(val, default=0.0):
     """[CLAUDE FIX B3] Converte un valore dal DB in float per i campi dei form Edit.
@@ -1234,19 +1234,25 @@ elif st.session_state.current_page == "RD_DECK":
 
     st.sidebar.write("---")
 
+    # [CLAUDE FIX B11] ---------------------------------------------------------------------------------------------
+    # Prima: checkbox + casella numerica 1–20 mm. Uno spessore fuori da quei limiti faceva andare in errore la pagina
+    # e si poteva digitare uno spessore inesistente (nessun risultato). Ora si sceglie da un elenco degli spessori
+    # realmente presenti nei coil mostrati; si possono selezionare più spessori. Nessuna selezione = tutti.
     st.sidebar.markdown("Thickness")
-    enable_thick_filter = st.sidebar.checkbox("Filter by Exact Thickness", value=False)
-    
-    available_thicknesses = sorted(list(set(meta.get("thickness", 3.0) for meta in combined_materials.values()))) if combined_materials else [3.0]
-    
-    selected_thickness = st.sidebar.number_input(
-        "Nominal Thickness [mm]", 
-        min_value=1.0, 
-        max_value=20.0, 
-        value=float(available_thicknesses[0]) if available_thicknesses else 3.0, 
-        step=0.1, 
-        format="%.1f"
-    ) if enable_thick_filter else None
+    available_thicknesses = sorted({
+        round(float(meta.get("thickness")), 2) for meta in combined_materials.values()
+        if meta.get("thickness") is not None and not np.isnan(float(meta.get("thickness")))
+    })
+    selected_thicknesses = st.sidebar.multiselect(
+        "Nominal Thickness [mm]",
+        options=available_thicknesses,
+        default=[],
+        format_func=lambda t: f"{t:.2f} mm",
+        placeholder="All thicknesses",
+        key="rd_thickness_filter"
+    )
+    enable_thick_filter = len(selected_thicknesses) > 0
+    # [END CLAUDE FIX B11] -----------------------------------------------------------------------------------------
 
     st.sidebar.write("---")
 
@@ -1310,7 +1316,8 @@ elif st.session_state.current_page == "RD_DECK":
         # [END CLAUDE FIX A1] -----------------------------------------------------------------------------------
 
         thick_val = metadata.get("thickness", 0)
-        thickness_match = True if not enable_thick_filter else (abs(thick_val - selected_thickness) <= 0.05)
+        # [CLAUDE FIX B11] il coil passa se il suo spessore è uno di quelli selezionati
+        thickness_match = True if not enable_thick_filter else any(abs(float(thick_val) - t) <= 0.005 for t in selected_thicknesses)
         
         if cert_status_filter == "Supplier Cert.":
             active_yield = metadata.get("cert_yield_MPa", 0)
@@ -1403,7 +1410,8 @@ elif st.session_state.current_page == "RD_DECK":
                             
                 with card_col2:
                     if info.get("is_promoted"):
-                        if st.button("↩️ Un-promote", key=f"demote_rd_{mat_id}", help="Send back to Production Hub"):
+                        # [CLAUDE FIX B12] il testo di aiuto chiarisce che i dati di laboratorio vengono conservati
+                        if st.button("↩️ Un-promote", key=f"demote_rd_{mat_id}", help="Send back to Production Hub (laboratory data are kept)"):
                             demote_cloud_material(mat_id)
                             st.toast("Material un-promoted and sent back to Production!")
                             st.rerun()
