@@ -1359,7 +1359,10 @@ elif st.session_state.current_page == "RD_DECK":
             active_yield = metadata.get("cert_yield_MPa", 0)
             active_uts = metadata.get("cert_uts_MPa", 0)
             active_elong = metadata.get("cert_elong_pct", 0)      # [CLAUDE FIX A1b] prima: "elongation_pct" (chiave inesistente -> 0)
-            cert_match = True
+            # [CLAUDE FIX CF1] Prima cert_match era sempre True: con "Supplier Cert." comparivano anche i coil senza
+            # certificato. Ora vengono mostrati solo i coil con il file del certificato caricato (certificate_url,
+            # letto come "datasheet"); i figli dello split ereditano il certificato del padre.
+            cert_match = bool(str(metadata.get("datasheet") or "").strip())
         elif cert_status_filter == "Laboratory":
             # [CLAUDE FIX A6] usa i valori di laboratorio calcolati sopra (prove di trazione o dog-bone);
             # sono mostrati solo i coil che hanno almeno un risultato di laboratorio.
@@ -1391,7 +1394,8 @@ elif st.session_state.current_page == "RD_DECK":
             elif not thickness_match:
                 reason = "Filtro spessore"
             elif not cert_match:
-                reason = "Nessun dato di laboratorio"
+                # [CLAUDE FIX CF1] motivo coerente con la modalità scelta
+                reason = "Nessun certificato caricato" if cert_status_filter == "Supplier Cert." else "Nessun dato di laboratorio"
             else:
                 reason = "Filtro proprietà meccaniche (yield / UTS / allungamento)"
             excluded_log.append((metadata.get("display_name", str(mat_id)), reason))
