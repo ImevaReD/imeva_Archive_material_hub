@@ -1487,26 +1487,65 @@ elif st.session_state.current_page == "RD_DECK":
             st.pyplot(fig_bar)
             
             st.subheader("📈 Multi-Material Comparative Curves")
+            # [CLAUDE FIX OV1] ---------------------------------------------------------------------------------------
+            # PROBLEMA (segnalato dall'utente): il grafico "Experimental Stress-Strain Overlay" disegnava SEMPRE le
+            # curve di tutti i coil filtrati che hanno dati dog-bone, senza legame con il coil scelto con
+            # "Analyze & Process Data". Scegliendo un coil senza curve restavano visibili solo quelle del coil
+            # precedente, che sembravano riferite al nuovo acciaio.
+            # SOLUZIONE:
+            #   - se è selezionato un coil, il grafico mostra la SUA curva (linea spessa) e il titolo riporta il coil;
+            #     se il coil non ha curve compare un avviso esplicito;
+            #   - il confronto con gli altri coil filtrati è facoltativo (casella "Confronta…", curve sottili grigie);
+            #   - se nessun coil è selezionato il grafico resta il confronto di tutti i coil filtrati (come prima).
+            sel_id = st.session_state.get("selected_material")
+            sel_info = filtered_materials.get(sel_id) if sel_id is not None else None
+            if sel_id is not None and sel_info is None and sel_id in combined_materials:
+                st.caption("ℹ️ Il coil selezionato non rientra nei filtri attuali della barra laterale.")
+            compare_others = True
+            if sel_info is not None:
+                compare_others = st.checkbox("Confronta con gli altri coil filtrati", value=False, key="overlay_compare_others")
+
             fig_comp, ax_comp = plt.subplots(figsize=(6, 3.8))
             curves_plotted = 0
+            sel_has_curve = False
 
             for mat_id, info in filtered_materials.items():
-                if mat_id in st.session_state.experimental_curves:
-                    exp = st.session_state.experimental_curves[mat_id]
-                    lot_name = info.get('lotto') or 'N/A'
+                if mat_id not in st.session_state.experimental_curves:
+                    continue
+                exp = st.session_state.experimental_curves[mat_id]
+                lot_name = info.get('lotto') or 'N/A'
+                if sel_info is not None and mat_id == sel_id:
+                    ax_comp.plot(exp["strain"], exp["stress_MPa"], label=f"▶ ID #{info['seq_id']} - Lot: {lot_name}",
+                                 lw=3, color="#C62828", zorder=5)
+                    sel_has_curve = True
+                    curves_plotted += 1
+                elif sel_info is None:
                     ax_comp.plot(exp["strain"], exp["stress_MPa"], label=f"ID #{info['seq_id']} - Lot: {lot_name}", lw=2)
                     curves_plotted += 1
+                elif compare_others:
+                    ax_comp.plot(exp["strain"], exp["stress_MPa"], label=f"ID #{info['seq_id']} - Lot: {lot_name}",
+                                 lw=1, color="#9E9E9E", alpha=0.8)
+                    curves_plotted += 1
+
+            if sel_info is not None and not sel_has_curve:
+                st.warning(f"Il coil selezionato (ID #{sel_info['seq_id']} - Lot: {sel_info.get('lotto') or 'N/A'}) non ha ancora "
+                           "curve dog-bone: caricale nella sezione 'Dog Bone Tensile Test CSV Processing' qui sotto.")
 
             if curves_plotted > 0:
                 ax_comp.set_xlabel("Strain [-]")
                 ax_comp.set_ylabel("Stress [MPa]")
-                ax_comp.set_title("Experimental Stress-Strain Overlay")
+                if sel_info is not None:
+                    ax_comp.set_title(f"Experimental Stress-Strain — ID #{sel_info['seq_id']}" + (" vs filtered coils" if compare_others else ""))
+                else:
+                    ax_comp.set_title("Experimental Stress-Strain Overlay (all filtered coils)")
                 ax_comp.grid(True, linestyle=":")
-                ax_comp.legend()
+                ax_comp.legend(fontsize=7)
                 fig_comp.tight_layout()
                 st.pyplot(fig_comp)
-            else:
+            elif sel_info is None:
                 st.info("Click 'Analyze & Process Data' below to upload CSV dog bone tests for curve plotting.")
+            plt.close(fig_comp)   # libera la memoria del grafico (prima le figure restavano aperte)
+            # [END CLAUDE FIX OV1] -------------------------------------------------------------------------------------
         else:
             st.caption("Awaiting inventory entries to generate strength comparison bars.")
 
