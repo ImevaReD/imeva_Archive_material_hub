@@ -392,6 +392,43 @@ def upload_certificate_to_cloud(uploaded_file, lotto_identifier):
         st.error(f"Cloud Storage Upload Error: {e}{_storage_error_hint(e)}")   # [CLAUDE FIX C2] + suggerimento
         return None
 
+# [CLAUDE FIX D3] -------------------------------------------------------------------------------------------------
+# Certificati in bucket PRIVATO (decisione utente, sicurezza punto D - opzione B).
+# Prima il bucket "certificate_storage" era pubblico: chiunque avesse l'indirizzo del PDF poteva aprirlo, senza
+# password e per sempre. Ora "View Cert" genera ogni volta un LINK TEMPORANEO (signed URL) che scade dopo
+# CERT_LINK_EXPIRES_S secondi. Il caricamento dei certificati non cambia (usa la chiave secret).
+# Nel database resta salvato l'indirizzo "pubblico" come prima: da quello si ricava il percorso del file nel bucket,
+# quindi i certificati già caricati funzionano senza ricaricarli e senza modificare il database.
+CERT_BUCKET = "certificate_storage"
+CERT_LINK_EXPIRES_S = 3600   # durata del link temporaneo: 1 ora
+
+def _cert_object_path(stored_value):
+    """Percorso del file nel bucket (es. 'certs/37_cert.pdf') ricavato dall'indirizzo salvato nel database."""
+    from urllib.parse import unquote, urlsplit
+    s = str(stored_value or "").strip()
+    if not s:
+        return None
+    path = unquote(urlsplit(s).path) if s.lower().startswith("http") else s
+    marker = f"/{CERT_BUCKET}/"
+    if marker in path:
+        path = path.split(marker, 1)[1]
+    return path.lstrip("/") or None
+
+def _signed_cert_url(stored_value):
+    """Restituisce (link_temporaneo, errore). link_temporaneo è None se non è stato possibile crearlo."""
+    if storage_client is None:
+        return None, STORAGE_KEY_MISSING_MSG
+    obj_path = _cert_object_path(stored_value)
+    if not obj_path:
+        return None, "Percorso del certificato non valido."
+    try:
+        res = storage_client.from_(CERT_BUCKET).create_signed_url(obj_path, CERT_LINK_EXPIRES_S)
+        url = (res.get("signedURL") or res.get("signedUrl")) if isinstance(res, dict) else res
+        return (url, None) if url else (None, f"File non trovato nello Storage: {obj_path}")
+    except Exception as e:
+        return None, f"Impossibile creare il link al certificato ({obj_path}): {e}{_storage_error_hint(e)}"
+# [END CLAUDE FIX D3] ---------------------------------------------------------------------------------------------
+
 @st.dialog("Supplier Mill Certificate Viewer", width="large")
 def show_cert_modal(mat_name, cert_url, info):
     st.markdown(f"### Material: `{mat_name}`")
@@ -399,12 +436,18 @@ def show_cert_modal(mat_name, cert_url, info):
     st.divider()
     
     if cert_url:
-        st.markdown(f" [Open certificate in a new browser tab]({cert_url})", unsafe_allow_html=True)
-        if cert_url.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-            st.image(cert_url, caption="Certificate Document", use_container_width=True)
+        # [CLAUDE FIX D3] link temporaneo al posto dell'indirizzo pubblico permanente
+        signed_url, sign_err = _signed_cert_url(cert_url)
+        if not signed_url:
+            st.error(sign_err)
+            return
+        st.markdown(f" [Open certificate in a new browser tab]({signed_url})", unsafe_allow_html=True)
+        st.caption(f"🔒 Link temporaneo: valido {CERT_LINK_EXPIRES_S // 60} minuti. Per riaprire il certificato dopo la scadenza usa di nuovo 'View Cert'.")
+        if str(_cert_object_path(cert_url) or "").lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+            st.image(signed_url, caption="Certificate Document", use_container_width=True)
         else:
             st.info(" Inline PDF previews are often restricted by security policies. Use the link above if the viewer below appears empty.")
-            st.markdown(f'<iframe src="{cert_url}" width="100%" height="600px"></iframe>', unsafe_allow_html=True)
+            st.markdown(f'<iframe src="{signed_url}" width="100%" height="600px"></iframe>', unsafe_allow_html=True)
     else:
         st.warning("No certificate URL provided.")
 
